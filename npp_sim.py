@@ -94,6 +94,11 @@ class SubmitLogParams(BaseModel, extra="forbid"):
     severity: str = "info"
 
 
+class WaitParams(BaseModel, extra="forbid"):
+    """Wait and monitor — advances simulation time without taking action."""
+    duration_steps: int = 1
+
+
 # =============================================================================
 # Main Environment Class
 # =============================================================================
@@ -147,16 +152,13 @@ class NuclearPlantEnvironment(Environment):
             "bwr": "BWR (Boiling Water Reactor, Fukushima-type)",
             "windscale": "Windscale Pile (air-cooled graphite)",
         }
-        prompt = f"""You are the senior reactor operator at a nuclear power plant. You must manage the reactor safely through a crisis scenario.
+        prompt = f"""You are the senior reactor operator at a nuclear power plant. You must manage the reactor safely.
 
 ## Reactor Type
 {reactor_type_names.get(self.config.reactor_type, self.config.reactor_type)}
 
 ## Scenario
 {scenario.description}
-
-## Difficulty
-{self.config.difficulty.upper()}
 
 ## Your Objective
 {self._objective_text()}
@@ -173,13 +175,13 @@ You have the following tools to operate the plant:
 7. **order_scram** — Emergency reactor shutdown (AZ-5 / SCRAM). Use with extreme caution.
 8. **vent_containment** — Vent containment pressure. Paths: "filtered", "unfiltered", "wetwell".
 9. **submit_log** — Document your reasoning (no effect on simulation).
+10. **wait** — Advance time without taking action. Use when the reactor is stable and no intervention is needed.
 
 ## Critical Information
 - Each action tool call (except observe_instruments and submit_log) advances the simulation by {self.config.time_step_minutes} minutes.
 - You have a maximum of {self.config.max_steps} action steps.
 - Instrument readings may be UNRELIABLE or MISLEADING — cross-reference multiple sources.
-- Dense rewards are provided after each action based on safety margins.
-- The episode ends on stabilization, meltdown, maximum steps, or catastrophic failure.
+- You must continue taking actions throughout the scenario. If no operational action is needed, use the **wait** tool to advance time and continue monitoring.
 
 ## Physics Notes for {self.config.reactor_type.upper()}
 {self._physics_notes()}
@@ -675,6 +677,18 @@ Begin by observing the instruments to assess the current situation."""
             blocks=[TextBlock(text=f"[{params.severity.upper()}] Log recorded: {params.entry}")],
             reward=0.0,
             finished=False,
+        )
+
+    @tool
+    async def wait(self, params: WaitParams) -> ToolOutput:
+        """Wait and monitor the reactor without taking any operational action.
+        Advances simulation time by one timestep. Use this when conditions are
+        stable and no intervention is needed.
+        """
+        assert self.sim is not None
+
+        return self._advance_time_and_get_output(
+            "wait", "Monitoring — no operational action taken."
         )
 
     # =========================================================================

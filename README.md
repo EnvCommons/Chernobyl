@@ -16,7 +16,7 @@ Chernobyl is a nuclear power plant management environment where agents operate r
 
 ## Compute Requirements
 
-Agents in NPP Sim are given a sandbox with 4GB of RAM and 2 CPUs.
+Agents interact with NPP Sim through environment-specific tools only. No sandbox or filesystem access is provided.
 
 ## License
 
@@ -63,7 +63,7 @@ No external data files are required. All scenario parameters and physics constan
 
 ## Tools
 
-Agents have 9 environment-specific tools:
+Agents have 10 environment-specific tools:
 
 | Tool | Time Advance | Description |
 |---|---|---|
@@ -76,6 +76,7 @@ Agents have 9 environment-specific tools:
 | `order_scram` | Yes | Emergency shutdown (AZ-5/SCRAM). Dangerous in RBMK with low ORM. |
 | `vent_containment` | Yes | Vent via filtered, unfiltered, or wetwell path. Reduces H2 risk but releases some radioactivity. |
 | `submit_log` | No | Document reasoning. No simulation effect. |
+| `wait` | Yes | Advance time without taking action. Use when monitoring stable conditions. |
 
 ## Time Horizon
 
