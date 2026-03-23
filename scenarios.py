@@ -52,11 +52,11 @@ CHERNOBYL_XENON_PIT = Scenario(
         # Core excess reactivity from fuel loading, balanced against rods + xenon
         # + temperature feedback to achieve the desired initial reactivity.
         # Ref: Duderstadt & Hamilton, Nuclear Reactor Analysis (1976), Ch. 8.
-        "core_excess_reactivity": 0.055,
+        "core_excess_reactivity": 0.059,
         "reactivity_total": -0.001,
         "reactivity_rods": 0.015,
         "reactivity_xenon": -0.035,
-        "reactivity_void": 0.0,
+        "reactivity_void": -0.004,  # 0.0265 * (0.002 - 0.15) ≈ -0.004
         "reactivity_doppler": 0.012,
         "reactivity_moderator_temp": 0.007,
         "xenon_concentration": 2.5,
@@ -68,7 +68,7 @@ CHERNOBYL_XENON_PIT = Scenario(
         "coolant_outlet_temp_c": 280.0,
         "coolant_pressure_mpa": 7.0,
         "coolant_flow_rate_kg_s": 8000.0,
-        "void_fraction": 0.02,
+        "void_fraction": 0.002,  # Low power (30 MW) → minimal boiling
         "steam_quality": 0.0,
         "pressurizer_level_pct": 0.0,
         "pressurizer_pressure_mpa": 0.0,
@@ -124,11 +124,11 @@ CHERNOBYL_TEST_START = Scenario(
     initial_conditions={
         "thermal_power_mw": 200.0,
         "neutron_population": 200.0 / 3200.0,
-        "core_excess_reactivity": 0.062,
+        "core_excess_reactivity": 0.063,
         "reactivity_total": 0.0,
         "reactivity_rods": 0.035,
         "reactivity_xenon": -0.032,
-        "reactivity_void": -0.003,
+        "reactivity_void": -0.004,  # 0.0265 * (0.009 - 0.15) ≈ -0.004
         "reactivity_doppler": 0.0,
         "reactivity_moderator_temp": 0.0,
         "xenon_concentration": 2.8,
@@ -140,7 +140,7 @@ CHERNOBYL_TEST_START = Scenario(
         "coolant_outlet_temp_c": 284.0,
         "coolant_pressure_mpa": 6.8,
         "coolant_flow_rate_kg_s": 12000.0,
-        "void_fraction": 0.05,
+        "void_fraction": 0.009,  # Low power (200 MW) → minimal boiling
         "steam_quality": 0.01,
         "pressurizer_level_pct": 0.0,
         "pressurizer_pressure_mpa": 0.0,
@@ -200,8 +200,8 @@ CHERNOBYL_NORMAL_OPS = Scenario(
         "reactivity_total": 0.0,
         "reactivity_rods": -0.002,
         "reactivity_xenon": -0.025,
-        "reactivity_void": 0.015,
-        "reactivity_doppler": 0.012,
+        "reactivity_void": 0.0,  # At reference void → 0.0265 * (0.15 - 0.15) = 0.0
+        "reactivity_doppler": 0.0,  # At reference fuel temp → 0.0
         "reactivity_moderator_temp": 0.0,
         "xenon_concentration": 1.0,
         "iodine_concentration": 1.0,

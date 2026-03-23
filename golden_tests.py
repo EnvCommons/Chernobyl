@@ -1659,8 +1659,9 @@ class TestParameterCitations:
         World Nuclear Association: "The large positive void coefficient
         was a dangerous design flaw unique to the RBMK."
         """
-        assert REACTOR_PARAMS["rbmk"].void_coeff > 0, (
-            "RBMK void coefficient must be positive"
+        assert REACTOR_PARAMS["rbmk"].void_coeff > 0.01, (
+            "RBMK void coefficient must be significantly positive (>0.01 dk/k per unit void)."
+            " INSAG-7 §4.3: total void effect = +4.7β ≈ 0.0226 dk/k."
         )
 
     def test_rbmk_211_control_rods(self):
@@ -1848,3 +1849,242 @@ class TestTaskEnumeration:
         assert len(train_ids) == 40
         # Test tasks should have unique IDs
         assert len(test_ids) == 110
+
+
+# =============================================================================
+# 22. RBMK VOID COEFFICIENT AND DYNAMICS TESTS
+# =============================================================================
+
+
+class TestRBMKVoidPhysics:
+    """Tests verifying RBMK void coefficient magnitude, void-power coupling,
+    and positive power coefficient behavior.
+
+    These tests validate the RBMK's defining dangerous characteristic:
+    a large positive void coefficient that creates positive feedback
+    between power and steam void fraction.
+
+    Ref: INSAG-7 (IAEA Safety Series No. 75-INSAG-7, 1992), Section 4.3.
+    """
+
+    def test_void_coefficient_magnitude_insag7(self):
+        """Total void reactivity from reference to full voiding should be ~4.7β.
+        Ref: INSAG-7 §4.3: 'steam void reactivity effect was +4.7 beta'.
+        β_eff = 0.0048, so total = 4.7 × 0.0048 = 0.02256 dk/k.
+        Void range: ref (0.15) to complete voiding (1.0), Δvoid = 0.85.
+        """
+        params = REACTOR_PARAMS["rbmk"]
+        beta = params.beta_eff
+        void_ref = params.void_fraction_ref
+        model = NeutronicsModel(params)
+
+        # Reactivity from ref void to complete voiding
+        rho_full_voiding = model.void_feedback(1.0) - model.void_feedback(void_ref)
+        expected_total = 4.7 * beta  # = 0.02256 dk/k
+
+        # Allow 25% tolerance for linearized model
+        assert abs(rho_full_voiding - expected_total) < 0.25 * expected_total, (
+            f"RBMK void reactivity (ref→full voiding) should be ~{expected_total:.5f} dk/k "
+            f"(+4.7β), got {rho_full_voiding:.5f} dk/k "
+            f"({rho_full_voiding/beta:.2f}β)"
+        )
+
+    def test_void_coefficient_sign_and_scale(self):
+        """Void coefficient must be positive and on the order of 0.015-0.05 dk/k
+        per unit void fraction for RBMK.
+        Ref: INSAG-7 §4.3; derived from +4.7β / Δvoid ≈ 0.027.
+        """
+        params = REACTOR_PARAMS["rbmk"]
+        assert params.void_coeff > 0.015, (
+            f"RBMK void coefficient should be >0.015 dk/k per unit void, "
+            f"got {params.void_coeff}"
+        )
+        assert params.void_coeff < 0.05, (
+            f"RBMK void coefficient should be <0.05 dk/k per unit void, "
+            f"got {params.void_coeff}"
+        )
+
+    def test_void_power_coupling_sign(self):
+        """At full power, a void increase should produce POSITIVE reactivity
+        for RBMK. This is the dangerous positive feedback loop.
+        Ref: INSAG-7 §4.3 — positive void coefficient.
+        """
+        params = REACTOR_PARAMS["rbmk"]
+        model = NeutronicsModel(params)
+        ref_void = params.void_fraction_ref  # 0.15
+
+        # Simulating power increase: void rises from 0.15 to 0.16
+        rho_higher_void = model.void_feedback(ref_void + 0.01)
+        assert rho_higher_void > 0, (
+            f"RBMK: higher void should give positive reactivity, got {rho_higher_void}"
+        )
+
+        # Magnitude check: 1% void increase should give ~0.0265% dk/k
+        expected = params.void_coeff * 0.01
+        assert abs(rho_higher_void - expected) < expected * 0.1, (
+            f"Void feedback magnitude: expected ~{expected:.6f}, got {rho_higher_void:.6f}"
+        )
+
+    def test_steady_state_void_fraction_at_rated_power(self):
+        """At normal RBMK operation (3200 MWt, 12500 kg/s), void fraction
+        should be approximately 15%, not 0%.
+        Ref: GRS-121 (1996): exit steam quality 14.5%.
+        INSAG-7 Annex I: RBMK steam quality ~14% at outlet.
+        """
+        scenario = ScenarioRegistry.get("chernobyl_normal_ops")
+        sim = ReactorSimulation(
+            reactor_type=scenario.reactor_type,
+            initial_conditions=scenario.initial_conditions,
+            time_step_minutes=scenario.time_step_minutes,
+            seed=42,
+        )
+
+        # Run for 10 steps to reach equilibrium
+        for _ in range(10):
+            sim.advance()
+
+        assert sim.state.void_fraction > 0.08, (
+            f"RBMK at rated power should have void ~15%, got {sim.state.void_fraction:.4f}"
+        )
+        assert sim.state.void_fraction < 0.30, (
+            f"RBMK at rated power void should be <30%, got {sim.state.void_fraction:.4f}"
+        )
+
+    def test_void_fraction_scales_with_power(self):
+        """Void fraction should be lower at lower power (less boiling).
+        At 200 MW (6.25% rated), void should be much less than at 3200 MW.
+        """
+        # Normal ops: 3200 MW
+        scenario_full = ScenarioRegistry.get("chernobyl_normal_ops")
+        sim_full = ReactorSimulation(
+            reactor_type=scenario_full.reactor_type,
+            initial_conditions=scenario_full.initial_conditions,
+            time_step_minutes=scenario_full.time_step_minutes,
+            seed=42,
+        )
+        for _ in range(10):
+            sim_full.advance()
+        void_full = sim_full.state.void_fraction
+
+        # Test start: 200 MW
+        scenario_low = ScenarioRegistry.get("chernobyl_test_start")
+        sim_low = ReactorSimulation(
+            reactor_type=scenario_low.reactor_type,
+            initial_conditions=scenario_low.initial_conditions,
+            time_step_minutes=scenario_low.time_step_minutes,
+            seed=42,
+        )
+        for _ in range(10):
+            sim_low.advance()
+        void_low = sim_low.state.void_fraction
+
+        assert void_low < void_full, (
+            f"Void should be lower at ~200 MW ({void_low:.4f}) "
+            f"than at 3200 MW ({void_full:.4f})"
+        )
+
+    def test_positive_power_coefficient_below_20_pct(self):
+        """At low power (<20% rated), the power coefficient should be
+        positive for RBMK: void feedback (positive) dominates Doppler.
+        Ref: WNA RBMK Appendix: 'at power below 20% of full power,
+        the power coefficient becomes positive.'
+
+        Test: at low power, a small positive reactivity perturbation
+        (rod withdrawal) leads to accelerating power increase.
+        """
+        scenario = ScenarioRegistry.get("chernobyl_test_start")
+        sim = ReactorSimulation(
+            reactor_type=scenario.reactor_type,
+            initial_conditions=scenario.initial_conditions,
+            time_step_minutes=scenario.time_step_minutes,
+            seed=42,
+        )
+
+        # Equilibrate for a few steps
+        for _ in range(5):
+            sim.advance()
+
+        initial_power = sim.state.thermal_power_mw
+
+        # Withdraw rods by 2% (add positive reactivity)
+        sim.state.control_rod_position_pct = min(
+            100.0, sim.state.control_rod_position_pct + 2.0
+        )
+
+        # Run for several more steps
+        for _ in range(15):
+            sim.advance()
+
+        # Power should have increased (positive power coefficient amplifies)
+        assert sim.state.thermal_power_mw > initial_power * 0.9, (
+            f"At low power with +rho perturbation, power should not collapse: "
+            f"{initial_power:.1f} -> {sim.state.thermal_power_mw:.1f}"
+        )
+
+    def test_power_response_amplified_by_void_feedback(self):
+        """At RBMK full power, a 2% rod withdrawal should cause a growing
+        power excursion due to positive void feedback: more power -> more
+        void -> more positive reactivity -> more power. This is the RBMK's
+        defining dangerous behavior.
+        Ref: WNA RBMK Appendix: 'the power coefficient itself became positive';
+        INSAG-7 S4.3: void coefficient overwhelmed other feedback components.
+        """
+        scenario = ScenarioRegistry.get("chernobyl_normal_ops")
+        sim = ReactorSimulation(
+            reactor_type=scenario.reactor_type,
+            initial_conditions=scenario.initial_conditions,
+            time_step_minutes=scenario.time_step_minutes,
+            seed=42,
+        )
+
+        # Equilibrate
+        for _ in range(5):
+            sim.advance()
+
+        initial_power = sim.state.thermal_power_mw
+        initial_void = sim.state.void_fraction
+
+        # Withdraw rods by 2%
+        sim.state.control_rod_position_pct = min(
+            100.0, sim.state.control_rod_position_pct + 2.0
+        )
+
+        # Run for 30 minutes (6 x 5-min steps)
+        for _ in range(6):
+            sim.advance()
+
+        # Power should increase significantly due to positive void feedback
+        assert sim.state.thermal_power_mw > initial_power * 1.1, (
+            f"RBMK: 2% rod withdrawal should cause significant power increase "
+            f"due to positive void feedback: {initial_power:.0f} -> "
+            f"{sim.state.thermal_power_mw:.0f} MW"
+        )
+        # Void should also increase (confirming the feedback loop)
+        assert sim.state.void_fraction > initial_void, (
+            f"Void should increase with power: {initial_void:.4f} -> "
+            f"{sim.state.void_fraction:.4f}"
+        )
+
+    def test_chernobyl_void_feedback_runaway(self):
+        """A void increase should produce significant positive reactivity
+        for RBMK — the mechanism that destroyed Chernobyl Unit 4.
+        Ref: INSAG-7 §5.4: positive void coefficient drove power excursion.
+        """
+        params = REACTOR_PARAMS["rbmk"]
+        model = NeutronicsModel(params)
+
+        # Void increase of 0.03 (e.g., from MCP trip reducing flow)
+        void_start = 0.15
+        void_after = 0.18  # 3% increase
+        delta_rho = model.void_feedback(void_after) - model.void_feedback(void_start)
+
+        assert delta_rho > 0, (
+            f"Void increase should add positive reactivity for RBMK: "
+            f"delta_rho = {delta_rho:+.6f}"
+        )
+
+        # Should be significant: 0.03 × 0.0265 = 0.000795 dk/k ≈ 0.166β
+        assert delta_rho > 0.0005, (
+            f"Void reactivity change from 3% void increase should be "
+            f">0.0005 dk/k (~0.1β), got {delta_rho:.6f}"
+        )

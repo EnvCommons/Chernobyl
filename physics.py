@@ -69,10 +69,13 @@ REACTOR_PARAMS: dict[str, ReactorParams] = {
     "rbmk": ReactorParams(
         rated_power_mw=3200.0,
         beta_eff=0.0048,
-        neutron_gen_time=5.0e-4,  # Graphite-moderated (~1ms) with water channels (~0.1ms)
+        neutron_gen_time=1.0e-3,  # Graphite-moderated: ~1ms (Stacey 2007 Table 5.1;
+                                  # Lamarsh & Baratta 2001 Ch.7; ScienceDirect overview)
         lambda_d=0.0767,
         doppler_coeff=-1.2e-5,
-        void_coeff=4.7e-4,           # POSITIVE! Key to Chernobyl (INSAG-7 §4.3: +4.7β)
+        void_coeff=0.0265,           # POSITIVE! INSAG-7 §4.3: total void effect = +4.7β
+                                  # = 4.7 × 0.0048 = 0.02256 dk/k from ref void (0.15)
+                                  # to complete voiding (1.0). Per unit: 0.02256/0.85.
         moderator_temp_coeff=-0.5e-5,
         fuel_temp_ref=1200.0,
         coolant_temp_ref=270.0,
@@ -624,24 +627,49 @@ class ThermalHydraulicsModel:
         if self.p.is_air_cooled:
             new_void = 0.0
         else:
-            # Saturation temperature at current pressure
             t_sat = self._saturation_temp(coolant_pressure)
-            if new_outlet_temp > t_sat and not self.p.has_pressurizer:
-                # Subcooled/saturated boiling
+
+            if self.p.void_fraction_ref > 0 and not self.p.has_pressurizer:
+                # Subcooled boiling model for RBMK-type reactors.
+                # Even when bulk outlet T is slightly below T_sat, fuel rod
+                # surface temperatures exceed T_sat, causing nucleate boiling.
+                # Ref: Malko (Natl. Acad. Sci. Belarus): boiling begins at
+                # ~2.5m from inlet; GRS-121: exit steam quality 14.5%.
+                # Equilibrium void scales with power/flow ratio.
+                power_frac = max(0.0, total_power) / max(self.p.rated_power_mw, 1.0)
+                nominal_flow = self.p.coolant_mass_kg / 24.0  # ~12500 kg/s for RBMK
+                flow_ratio = nominal_flow / max(coolant_flow_kg_s, 1.0)
+                void_eq = self.p.void_fraction_ref * power_frac * flow_ratio
+                # Additional voiding if bulk T exceeds T_sat (saturated boiling)
+                if new_outlet_temp > t_sat:
+                    void_eq += 0.01 * (new_outlet_temp - t_sat)
+                void_eq = min(0.95, max(0.0, void_eq))
+                # Relax toward equilibrium; tau_void ~5s (steam transport time)
+                tau_void = 5.0
+                alpha_v = min(1.0, dt / tau_void)
+                new_void = void_fraction + alpha_v * (void_eq - void_fraction)
+                new_void = max(0.0, min(0.95, new_void))
+            elif self.p.is_bwr:
+                # BWR operates near saturation
+                if new_outlet_temp > t_sat - 5:
+                    excess = max(0, new_outlet_temp - (t_sat - 5))
+                    new_void = min(0.8, 0.1 + 0.005 * excess)
+                else:
+                    new_void = max(0.0, void_fraction - 0.01 * dt / 60.0)
+            elif new_outlet_temp > t_sat and not self.p.has_pressurizer:
+                # Generic: saturated boiling
                 excess = new_outlet_temp - t_sat
                 new_void = min(0.95, void_fraction + 0.001 * excess * dt / 60.0)
-            elif new_outlet_temp > t_sat - 5 and self.p.is_bwr:
-                # BWR operates near saturation
-                excess = max(0, new_outlet_temp - (t_sat - 5))
-                new_void = min(0.8, 0.1 + 0.005 * excess)
             else:
-                # Subcooled: voids collapse
+                # Subcooled: voids collapse (PWR or generic subcooled)
                 new_void = max(0.0, void_fraction - 0.01 * dt / 60.0)
 
-            # Flow-dependent: higher flow suppresses void
-            if coolant_flow_kg_s > 100:
-                flow_suppression = min(0.1, coolant_flow_kg_s / 100000.0)
-                new_void = max(0.0, new_void - flow_suppression)
+            # Flow-dependent suppression (for non-subcooled-boiling cases only;
+            # the subcooled boiling model already accounts for flow via flow_ratio)
+            if not (self.p.void_fraction_ref > 0 and not self.p.has_pressurizer):
+                if coolant_flow_kg_s > 100:
+                    flow_suppression = min(0.1, coolant_flow_kg_s / 100000.0)
+                    new_void = max(0.0, new_void - flow_suppression)
 
         # -- Pressure --
         new_pressure = coolant_pressure
