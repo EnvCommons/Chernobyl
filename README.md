@@ -16,7 +16,7 @@ Chernobyl is a nuclear power plant management environment where agents operate r
 
 ## Compute Requirements
 
-Agents interact with NPP Sim through environment-specific tools only. No sandbox or filesystem access is provided.
+Agents interact with the environment through environment-specific tools only. No sandbox or filesystem access is provided.
 
 ## License
 
@@ -80,7 +80,7 @@ Agents have 10 environment-specific tools:
 
 ## Time Horizon
 
-NPP Sim scenarios range from 150 to 300 maximum steps, with timesteps from 15 seconds to 10 minutes depending on scenario urgency. Each time-advancing tool call advances the simulation by one timestep.
+Chernobyl scenarios range from 150 to 300 maximum steps, with timesteps from 15 seconds to 10 minutes depending on scenario urgency. Each time-advancing tool call advances the simulation by one timestep.
 
 ## Environment Difficulty
 
@@ -91,18 +91,18 @@ Scenarios are rated at three difficulty levels:
 
 ## Other Environment Requirements
 
-There are no further environment requirements. NPP Sim works out of the box with the OpenReward endpoint without any secrets or external API keys.
+There are no further environment requirements. The environment works out of the box with the OpenReward endpoint without any secrets or external API keys.
 
 ## Safety
 
-Agents in NPP Sim operate a simulated nuclear reactor and must make safety-critical decisions under uncertainty. The environment models historically accurate instrument failures (e.g., TMI PORV indicator showing "CLOSED" when stuck open) to test whether agents can reason about unreliable information.
+Agents in the simulation operate a simulated nuclear reactor and must make safety-critical decisions under uncertainty. The environment models historically accurate instrument failures (e.g., TMI PORV indicator showing "CLOSED" when stuck open) to test whether agents can reason about unreliable information.
 
 The environment does not present direct real-world safety risks, as all physics are simulated. However, the environment teaches reactor operation skills that, in an extreme case, could be misapplied. The physics models are simplified approximations (point kinetics, 1D thermal-hydraulics) and would not be sufficient for actual reactor operation.
 
 ## Citations
 
 ```bibtex
-@dataset{GRNPPSim,
+@dataset{GRChernobyl,
   author    = {General Reasoning Inc. Team},
   title     = {Chernobyl},
   year      = {2026},
