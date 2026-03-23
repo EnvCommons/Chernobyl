@@ -6,6 +6,8 @@
 
 Chernobyl is a nuclear power plant management environment where agents operate reactors through crisis scenarios inspired by four real historical disasters: Chernobyl (1986), Three Mile Island (1979), Fukushima Daiichi (2011), and Windscale (1957). The simulation couples point kinetics neutronics, thermal-hydraulics, xenon-135 dynamics, fuel integrity, containment physics, and Wigner energy models to create realistic reactor behavior.
 
+**Note**: This is a synthetic environment which was majority AI-generated; we recommend testing it thoroughly before any use in an RL pipeline.
+
 ## Capabilities
 
 - Diagnosing reactor emergencies from instrument readings (some of which may be malfunctioning or misleading)
