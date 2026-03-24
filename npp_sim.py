@@ -385,12 +385,23 @@ Begin by observing the instruments to assess the current situation."""
         else:
             s.control_rod_position_pct = old_pos + actual_change
 
-        # Update rod reactivity
+        # Update rod reactivity: scale the CHANGE by manual_rod_worth_fraction
+        # to represent movement of a small rod group, not all rods.
+        # Ref: RBMK operators moved 1-4 rods at a time (SIUR panel max: 4).
         inserting = s.control_rod_position_pct < old_pos
-        s.reactivity_rods = self.sim.neutronics.control_rod_reactivity(
+        old_rho = self.sim.neutronics.control_rod_reactivity(
+            old_pos,
+            inserting_from_withdrawn=inserting and old_pos > 80.0,
+        )
+        new_rho_full = self.sim.neutronics.control_rod_reactivity(
             s.control_rod_position_pct,
             inserting_from_withdrawn=inserting and old_pos > 80.0,
         )
+        delta = new_rho_full - old_rho
+        scaled_delta = delta * self.sim.params.manual_rod_worth_fraction
+        s.reactivity_rods = old_rho + scaled_delta
+        # Track offset so advance() preserves the manual scaling
+        s.manual_rod_reactivity_offset = s.reactivity_rods - new_rho_full
 
         # Update ORM for RBMK
         if self.sim.reactor_type == "rbmk":

@@ -105,6 +105,13 @@ class ReactorState:
     # Ref: Duderstadt & Hamilton, Nuclear Reactor Analysis (1976), Ch. 8.
     core_excess_reactivity: float = 0.0
 
+    # Manual rod reactivity offset: difference between full-worth and
+    # manual-scaled rod reactivity. When the operator adjusts a small
+    # rod group, only a fraction of the total worth changes. This offset
+    # preserves the scaled reactivity across advance() calls.
+    # Reset to 0.0 during scram (all rods insert with full worth).
+    manual_rod_reactivity_offset: float = 0.0
+
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ReactorState:
         """Create state from initial conditions dictionary."""
@@ -177,16 +184,17 @@ class ReactorSimulation:
         precursor_conc: float,
         base_reactivity: float,
     ) -> tuple[float, float, float]:
-        """Advance power with implicit Doppler feedback coupling.
+        """Advance power with implicit Doppler and void feedback coupling.
 
         Instead of using a fixed reactivity for the entire timestep, this
-        method embeds fuel temperature feedback into the neutronics sub-steps.
-        As power changes, fuel temperature adjusts (with thermal inertia),
-        and Doppler feedback modifies the effective reactivity.
+        method embeds fuel temperature and void fraction feedback into the
+        neutronics sub-steps. As power changes, fuel temperature and void
+        evolve (with thermal inertia), and Doppler + void feedback modify
+        the effective reactivity.
 
         This prevents the oscillatory instability that occurs with explicit
-        operator splitting when the Doppler feedback timescale is shorter
-        than the integration timestep.
+        operator splitting when feedback timescales are shorter than the
+        integration timestep.
 
         Ref: Quasi-static method — Ott & Neuhold, Nuclear Reactor Dynamics
         (1985); used in PARCS/TRACE coupling (NUREG/CR-6899).
@@ -197,22 +205,24 @@ class ReactorSimulation:
         rated = self.params.rated_power_mw
         dopp_coeff = self.params.doppler_coeff
         fuel_temp_ref = self.params.fuel_temp_ref
+        void_coeff = self.params.void_coeff
+        void_ref = self.params.void_fraction_ref
 
         # Current fuel temperature (already updated by thermal model)
         current_fuel_temp = self.state.fuel_temp_c
 
-        # Doppler feedback is already included in base_reactivity.
-        # We'll track the CHANGE in Doppler as power evolves.
-        # The Doppler portion of base_reactivity was computed from
-        # current_fuel_temp, so we need to adjust as fuel temp changes.
+        # Void coupling: for reactors with subcooled boiling (RBMK),
+        # void fraction evolves with power within the sub-steps.
+        has_subcooled_boiling = (
+            void_ref > 0 and not self.params.has_pressurizer
+        )
+        void_fraction = self.state.void_fraction
 
-        # Non-Doppler reactivity (everything except Doppler)
-        rho_non_doppler = base_reactivity - self.neutronics.doppler_feedback(current_fuel_temp)
-
-        # Fuel temperature is approximately proportional to power:
-        # T_fuel ≈ T_ref * (P / P_rated) for P > ~5% rated
-        # So Doppler feedback is: dopp_coeff * (T_ref * P/P_rated - T_ref)
-        #                       = dopp_coeff * T_ref * (P/P_rated - 1)
+        # Strip both Doppler and void from base_reactivity to get the
+        # "fixed" components (rods, xenon, moderator temp, core excess).
+        current_doppler = self.neutronics.doppler_feedback(current_fuel_temp)
+        current_void_rho = void_coeff * (void_fraction - void_ref)
+        rho_fixed = base_reactivity - current_doppler - current_void_rho
 
         # Sub-stepping for neutronics (based on system stiffness).
         # Fast eigenvalue is |rho-beta|/Lambda (prompt neutron timescale).
@@ -250,8 +260,19 @@ class ReactorSimulation:
             # Compute Doppler from current fuel temp
             doppler_rho = dopp_coeff * (fuel_temp - fuel_temp_ref)
 
+            # Update void fraction (subcooled boiling model for RBMK)
+            if has_subcooled_boiling:
+                power_frac_v = max(current_power / rated, 0.0)
+                void_eq = void_ref * power_frac_v
+                alpha_void = min(1.0, sub_dt / 5.0)  # tau_void = 5s
+                void_fraction = void_fraction + alpha_void * (void_eq - void_fraction)
+                void_fraction = max(0.0, min(0.95, void_fraction))
+
+            # Compute void reactivity from current void fraction
+            void_rho = void_coeff * (void_fraction - void_ref)
+
             # Effective reactivity for this sub-step
-            rho = rho_non_doppler + doppler_rho
+            rho = rho_fixed + doppler_rho + void_rho
 
             # Point kinetics RK4 step
             def dn(n_val: float, c_val: float) -> float:
@@ -277,11 +298,13 @@ class ReactorSimulation:
 
         new_power = n * rated
 
-        # Update the fuel temperature on state to reflect the coupled evolution.
-        # This overrides the thermal model's estimate with the coupled result.
+        # Update state to reflect the coupled evolution.
+        # These override the thermal model's estimates with the coupled result.
         self.state.fuel_temp_c = fuel_temp
         self.state.fuel_centerline_temp_c = min(fuel_temp * 1.5, 2865.0)
         self.state.reactivity_doppler = dopp_coeff * (fuel_temp - fuel_temp_ref)
+        self.state.void_fraction = void_fraction
+        self.state.reactivity_void = void_coeff * (void_fraction - void_ref)
 
         return new_power, n, c
 
@@ -301,6 +324,10 @@ class ReactorSimulation:
         # during initial rod insertion was a key factor in the Chernobyl
         # accident (AZ-5 button caused initial power surge).
         if s.rods_inserting or s.scram_active:
+            # Scram / rod insertion: ALL rods insert with full worth.
+            # Clear manual offset — this is no longer a small-group adjustment.
+            s.manual_rod_reactivity_offset = 0.0
+
             rod_speed = self.params.rod_speed_pct_per_s
             total_movement = rod_speed * dt
             old_position = s.control_rod_position_pct
@@ -334,13 +361,13 @@ class ReactorSimulation:
                 s.rods_inserting = False
                 s.scram_active = False
         else:
-            # Always keep rod reactivity consistent with rod position.
-            # This ensures the physics model and the state agree, preventing
-            # reactivity imbalance from hand-tuned initial conditions.
-            s.reactivity_rods = self.neutronics.control_rod_reactivity(
+            # Normal operation: rod reactivity from position plus any manual
+            # offset from scaled rod group adjustments.
+            base_rho = self.neutronics.control_rod_reactivity(
                 s.control_rod_position_pct,
                 inserting_from_withdrawn=False,
             )
+            s.reactivity_rods = base_rho + s.manual_rod_reactivity_offset
 
         # 2. Calculate effective coolant flow
         effective_flow = self.equipment.get_effective_coolant_flow()

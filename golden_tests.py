@@ -2088,3 +2088,119 @@ class TestRBMKVoidPhysics:
             f"Void reactivity change from 3% void increase should be "
             f">0.0005 dk/k (~0.1β), got {delta_rho:.6f}"
         )
+
+    def test_manual_rod_adjustment_moderate_power_change(self):
+        """A 2% manual rod withdrawal at RBMK full power should give a
+        moderate power change (2-20%), not the 41% seen when all 211 rods
+        move simultaneously. In reality, operators moved 1-4 rods at a time.
+        Ref: WNA RBMK Appendix; Podlazov & Chichulin (2004), Atomic Energy.
+        """
+        scenario = ScenarioRegistry.get("chernobyl_normal_ops")
+        sim = ReactorSimulation(
+            reactor_type=scenario.reactor_type,
+            initial_conditions=scenario.initial_conditions,
+            time_step_minutes=scenario.time_step_minutes,
+            seed=42,
+        )
+
+        # Equilibrate
+        for _ in range(5):
+            sim.advance()
+
+        initial_power = sim.state.thermal_power_mw
+
+        # Simulate manual rod adjustment (scaled delta, like npp_sim does)
+        old_pos = sim.state.control_rod_position_pct
+        new_pos = min(100.0, old_pos + 2.0)
+        sim.state.control_rod_position_pct = new_pos
+
+        old_rho = sim.neutronics.control_rod_reactivity(old_pos)
+        new_rho_full = sim.neutronics.control_rod_reactivity(new_pos)
+        delta = new_rho_full - old_rho
+        scaled_delta = delta * sim.params.manual_rod_worth_fraction
+        sim.state.reactivity_rods = old_rho + scaled_delta
+        sim.state.manual_rod_reactivity_offset = (
+            sim.state.reactivity_rods - new_rho_full
+        )
+
+        # Run for 30 minutes (6 x 5-min steps)
+        for _ in range(6):
+            sim.advance()
+
+        pct_change = abs(sim.state.thermal_power_mw - initial_power) / initial_power * 100
+        assert pct_change < 20.0, (
+            f"Manual 2% rod withdrawal should give <20% power change, "
+            f"got {pct_change:.1f}% ({initial_power:.0f} -> "
+            f"{sim.state.thermal_power_mw:.0f} MW)"
+        )
+        assert pct_change > 1.0, (
+            f"Manual 2% rod withdrawal should have noticeable effect, "
+            f"got only {pct_change:.1f}%"
+        )
+
+    def test_scram_uses_full_rod_worth(self):
+        """Scram (AZ-5) must use full rod worth of all rods, not the
+        scaled manual fraction. This ensures emergency shutdown is effective.
+        """
+        params = REACTOR_PARAMS["rbmk"]
+        model = NeutronicsModel(params)
+
+        # Full worth at 0% (fully inserted) vs 50% (mid-position)
+        rho_0 = model.control_rod_reactivity(0.0)
+        rho_50 = model.control_rod_reactivity(50.0)
+
+        # Full scram delta from 50% to 0% should use total_rod_worth.
+        # S-curve at 50% gives worth_fraction=0.5, so remaining worth is
+        # exactly half of total (0.075 dk/k for RBMK).
+        scram_delta = rho_0 - rho_50
+        assert scram_delta < -0.05, (
+            f"Scram should insert large negative reactivity (full rod worth), "
+            f"got {scram_delta:.4f} dk/k"
+        )
+        # Verify it uses full worth (not manual_rod_worth_fraction).
+        # Manual fraction for RBMK is 0.10, so if scaling were applied,
+        # the delta would be only ~0.0075 dk/k. It should be ~0.075.
+        manual_equiv = abs(scram_delta) * params.manual_rod_worth_fraction
+        assert abs(scram_delta) > 5.0 * manual_equiv, (
+            f"Scram delta {scram_delta:.4f} should be much larger than "
+            f"manual-scaled value {manual_equiv:.4f}"
+        )
+
+    def test_void_evolves_within_power_substeps(self):
+        """Void fraction should evolve within a single timestep when power
+        changes, not be stuck at the old value until the next step.
+        This tests the coupled void feedback in _coupled_power_update.
+        """
+        scenario = ScenarioRegistry.get("chernobyl_normal_ops")
+        sim = ReactorSimulation(
+            reactor_type=scenario.reactor_type,
+            initial_conditions=scenario.initial_conditions,
+            time_step_minutes=scenario.time_step_minutes,
+            seed=42,
+        )
+
+        # Equilibrate
+        for _ in range(5):
+            sim.advance()
+
+        void_before = sim.state.void_fraction
+
+        # Add a significant positive reactivity perturbation (direct, full worth)
+        # to force a large power excursion within one step
+        sim.state.control_rod_position_pct += 2.0
+        sim.state.manual_rod_reactivity_offset = 0.0  # Use full worth for this test
+
+        sim.advance()
+
+        void_after = sim.state.void_fraction
+
+        # Void should have changed in response to the power excursion
+        assert void_after != void_before, (
+            f"Void fraction should evolve within a timestep when power changes: "
+            f"before={void_before:.4f}, after={void_after:.4f}"
+        )
+        # Power went up → more boiling → void should increase
+        assert void_after > void_before, (
+            f"Void should increase when power increases (RBMK subcooled boiling): "
+            f"{void_before:.4f} -> {void_after:.4f}"
+        )

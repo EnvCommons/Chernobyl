@@ -64,6 +64,15 @@ class ReactorParams:
     has_pressurizer: bool          # PWR pressurizer
     is_air_cooled: bool            # Windscale air-cooled
 
+    # Manual rod group scaling: fraction of total rod worth affected by
+    # a manual rod adjustment. In a real RBMK, operators moved 1-4 rods
+    # at a time out of 211 total (SIUR panel max: 4 rods). The simulation
+    # uses a single aggregate position, so manual adjustments are scaled
+    # by this fraction to represent movement of a small rod group.
+    # Scram (AZ-5) always uses full worth (all rods insert).
+    # Ref: WNA RBMK Appendix; Podlazov & Chichulin (2004), Atomic Energy 96(1).
+    manual_rod_worth_fraction: float
+
 
 REACTOR_PARAMS: dict[str, ReactorParams] = {
     "rbmk": ReactorParams(
@@ -103,6 +112,7 @@ REACTOR_PARAMS: dict[str, ReactorParams] = {
         is_bwr=False,
         has_pressurizer=False,
         is_air_cooled=False,
+        manual_rod_worth_fraction=0.10,  # ~21 of 211 rods (a few manual groups)
     ),
     "pwr": ReactorParams(
         rated_power_mw=2772.0,
@@ -134,6 +144,7 @@ REACTOR_PARAMS: dict[str, ReactorParams] = {
         is_bwr=False,
         has_pressurizer=True,
         is_air_cooled=False,
+        manual_rod_worth_fraction=0.25,  # 1 of 4 rod banks
     ),
     "bwr": ReactorParams(
         rated_power_mw=2381.0,
@@ -165,6 +176,7 @@ REACTOR_PARAMS: dict[str, ReactorParams] = {
         is_bwr=True,
         has_pressurizer=False,
         is_air_cooled=False,
+        manual_rod_worth_fraction=0.25,  # 1 of ~4 rod groups
     ),
     "windscale": ReactorParams(
         rated_power_mw=180.0,
@@ -196,6 +208,7 @@ REACTOR_PARAMS: dict[str, ReactorParams] = {
         is_bwr=False,
         has_pressurizer=False,
         is_air_cooled=True,
+        manual_rod_worth_fraction=0.25,  # ~6 of 24 rods
     ),
 }
 
