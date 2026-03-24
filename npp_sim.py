@@ -386,10 +386,12 @@ Begin by observing the instruments to assess the current situation."""
             s.control_rod_position_pct = old_pos + actual_change
 
         # Update rod reactivity: scale the CHANGE by manual_rod_worth_fraction
-        # to represent movement of a small rod group, not all rods.
-        # Ref: RBMK operators moved 1-4 rods at a time (SIUR panel max: 4).
+        # to represent movement of a small rod group, not all rods simultaneously.
+        # RBMK-1000 SIUR panel allowed manual control of individual rod groups
+        # (1-4 rods at a time out of 211 total channels).
+        # Ref: WNA RBMK Appendix; Podlazov & Chichulin (2004), Atomic Energy 97(6).
         inserting = s.control_rod_position_pct < old_pos
-        old_rho = self.sim.neutronics.control_rod_reactivity(
+        old_rho_full = self.sim.neutronics.control_rod_reactivity(
             old_pos,
             inserting_from_withdrawn=inserting and old_pos > 80.0,
         )
@@ -397,17 +399,34 @@ Begin by observing the instruments to assess the current situation."""
             s.control_rod_position_pct,
             inserting_from_withdrawn=inserting and old_pos > 80.0,
         )
-        delta = new_rho_full - old_rho
+        delta = new_rho_full - old_rho_full
+        # Scale delta by manual fraction: only a subset of rods moves, so the
+        # reactivity change is a fraction of what all-rod movement would produce.
+        # Ref: INSAG-7 §5.2 — manual rod worth is a fraction of total rod worth.
         scaled_delta = delta * self.sim.params.manual_rod_worth_fraction
-        s.reactivity_rods = old_rho + scaled_delta
+        # Accumulate onto current reactivity_rods (not full-worth baseline) so
+        # that consecutive manual adjustments compose correctly.
+        s.reactivity_rods = s.reactivity_rods + scaled_delta
         # Track offset so advance() preserves the manual scaling
         s.manual_rod_reactivity_offset = s.reactivity_rods - new_rho_full
 
-        # Update ORM for RBMK
+        # Update ORM for RBMK: track relative change from initial ORM.
+        # ORM is an abstract weighted value (not simply num_rods * insertion_fraction)
+        # because rod worth depends on flux distribution, burn-up, and rod type.
+        # The SKALA computer at Chernobyl took 10-15 min to compute ORM from
+        # flux measurements (INSAG-7 §5; WNA RBMK Appendix).
+        # We scale the initial ORM linearly with rod position changes.
         if self.sim.reactor_type == "rbmk":
-            s.orm_count = int(
-                self.sim.params.num_control_rods * (1.0 - s.control_rod_position_pct / 100.0)
-            )
+            initial_pos = self.config.initial_conditions.get("control_rod_position_pct", 50.0)
+            initial_orm = self.config.initial_conditions.get("orm_count", 30)
+            # More insertion (lower position) = higher ORM; withdrawal = lower ORM
+            pos_change = s.control_rod_position_pct - initial_pos
+            withdrawn_pct = 100.0 - initial_pos
+            if withdrawn_pct > 0:
+                orm_per_pct = initial_orm / withdrawn_pct
+            else:
+                orm_per_pct = self.sim.params.num_control_rods / 100.0
+            s.orm_count = max(0, int(initial_orm - pos_change * orm_per_pct))
 
         detail = (
             f"Rods {params.action}: {old_pos:.1f}% → {s.control_rod_position_pct:.1f}% "

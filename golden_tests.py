@@ -2138,6 +2138,81 @@ class TestRBMKVoidPhysics:
             f"got only {pct_change:.1f}%"
         )
 
+    def test_consecutive_manual_rod_adjustments_correct_direction(self):
+        """Consecutive manual rod adjustments should compose correctly:
+        withdraw then insert should return reactivity to approximately the
+        original value. Previously, the second adjustment used the full-worth
+        baseline instead of the accumulated value, causing rod insertion to
+        ADD positive reactivity (+1 beta-eff).
+        Ref: Point kinetics with feedback — Ott & Neuhold (1985) Ch. 6;
+        RBMK manual rod groups: INSAG-7 §5.2, WNA RBMK Appendix.
+        """
+        scenario = ScenarioRegistry.get("chernobyl_normal_ops")
+        sim = ReactorSimulation(
+            reactor_type=scenario.reactor_type,
+            initial_conditions=scenario.initial_conditions,
+            time_step_minutes=scenario.time_step_minutes,
+            seed=42,
+        )
+
+        # Equilibrate
+        for _ in range(5):
+            sim.advance()
+
+        rho_before = sim.state.reactivity_rods
+
+        # Step 1: Withdraw 2% (should add positive reactivity)
+        old_pos = sim.state.control_rod_position_pct
+        new_pos = min(100.0, old_pos + 2.0)
+        sim.state.control_rod_position_pct = new_pos
+
+        old_rho_full = sim.neutronics.control_rod_reactivity(old_pos)
+        new_rho_full = sim.neutronics.control_rod_reactivity(new_pos)
+        delta = new_rho_full - old_rho_full
+        scaled_delta = delta * sim.params.manual_rod_worth_fraction
+        sim.state.reactivity_rods = sim.state.reactivity_rods + scaled_delta
+        sim.state.manual_rod_reactivity_offset = (
+            sim.state.reactivity_rods - new_rho_full
+        )
+
+        rho_after_withdraw = sim.state.reactivity_rods
+        assert rho_after_withdraw > rho_before, (
+            f"Withdrawal should increase reactivity_rods (less negative): "
+            f"before={rho_before:.6f}, after={rho_after_withdraw:.6f}"
+        )
+
+        sim.advance()
+
+        # Step 2: Insert 2% back (should add negative reactivity)
+        old_pos2 = sim.state.control_rod_position_pct
+        new_pos2 = max(0.0, old_pos2 - 2.0)
+        sim.state.control_rod_position_pct = new_pos2
+
+        old_rho_full2 = sim.neutronics.control_rod_reactivity(old_pos2)
+        new_rho_full2 = sim.neutronics.control_rod_reactivity(new_pos2)
+        delta2 = new_rho_full2 - old_rho_full2
+        scaled_delta2 = delta2 * sim.params.manual_rod_worth_fraction
+        sim.state.reactivity_rods = sim.state.reactivity_rods + scaled_delta2
+        sim.state.manual_rod_reactivity_offset = (
+            sim.state.reactivity_rods - new_rho_full2
+        )
+
+        rho_after_insert = sim.state.reactivity_rods
+
+        # Key assertion: insertion must DECREASE reactivity (more negative)
+        assert rho_after_insert < rho_after_withdraw, (
+            f"Insertion should decrease reactivity_rods (more negative): "
+            f"after_withdraw={rho_after_withdraw:.6f}, "
+            f"after_insert={rho_after_insert:.6f}"
+        )
+
+        # Reactivity should return approximately to original value
+        assert abs(rho_after_insert - rho_before) < 0.001, (
+            f"Withdraw+insert should approximately cancel: "
+            f"original={rho_before:.6f}, final={rho_after_insert:.6f}, "
+            f"diff={abs(rho_after_insert - rho_before):.6f}"
+        )
+
     def test_scram_uses_full_rod_worth(self):
         """Scram (AZ-5) must use full rod worth of all rods, not the
         scaled manual fraction. This ensures emergency shutdown is effective.

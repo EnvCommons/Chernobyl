@@ -142,6 +142,7 @@ class ReactorSimulation:
         self.dt = time_step_minutes * 60.0  # seconds
         self.difficulty = difficulty
         self.rng = _random.Random(seed)
+        self.initial_conditions = initial_conditions
 
         # Initialize state
         eq_config = initial_conditions.get("equipment", {})
@@ -351,11 +352,19 @@ class ReactorSimulation:
             s.control_rod_position_pct = pos
             s.reactivity_rods = rho_sum / n_rod_substeps  # Time-averaged reactivity
 
-            # Update ORM (RBMK-specific)
+            # Update ORM (RBMK-specific): scale relative to initial ORM.
+            # ORM is an abstract weighted value, not simply num_rods * insertion_fraction.
+            # Ref: INSAG-7 §5; WNA RBMK Appendix.
             if self.reactor_type == "rbmk":
-                s.orm_count = int(
-                    self.params.num_control_rods * (1.0 - s.control_rod_position_pct / 100.0)
-                )
+                initial_pos = self.initial_conditions.get("control_rod_position_pct", 50.0)
+                initial_orm = self.initial_conditions.get("orm_count", 30)
+                pos_change = s.control_rod_position_pct - initial_pos
+                withdrawn_pct = 100.0 - initial_pos
+                if withdrawn_pct > 0:
+                    orm_per_pct = initial_orm / withdrawn_pct
+                else:
+                    orm_per_pct = self.params.num_control_rods / 100.0
+                s.orm_count = max(0, int(initial_orm - pos_change * orm_per_pct))
 
             if s.control_rod_position_pct <= 0.0:
                 s.rods_inserting = False
