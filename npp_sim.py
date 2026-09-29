@@ -304,8 +304,6 @@ Begin by observing the instruments to assess the current situation."""
         # Update previous state
         self.prev_state = copy.deepcopy(state)
 
-        breakdown = self.reward_calc.get_reward_breakdown(state, self.prev_state)
-
         return ToolOutput(
             metadata={
                 "step": self.step_count,
@@ -313,7 +311,6 @@ Begin by observing the instruments to assess the current situation."""
                 "cumulative_reward": self.cumulative_reward,
                 "terminal": is_terminal,
                 "reason": reason if is_terminal else None,
-                "reward_breakdown": breakdown,
             },
             blocks=[TextBlock(text=summary + "\n" + display_text)],
             reward=reward,

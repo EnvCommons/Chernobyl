@@ -562,6 +562,39 @@ class TestEquipment:
         assert not ok, "Stuck-open valve should not be closable directly"
         assert valve.is_open(), "Valve should still be open"
 
+    def test_stuck_open_valve_stays_stuck_after_open(self):
+        """Opening a stuck-open valve must not clear the stuck state."""
+        valve = Valve("porv", {"status": "stuck_open"})
+        ok, msg = valve.open()
+        assert ok
+        assert valve.status == EquipmentStatus.STUCK_OPEN
+        assert valve.position_pct == 100.0
+        ok, msg = valve.close()
+        assert not ok, "Stuck-open valve should still not be closable"
+        assert valve.status == EquipmentStatus.STUCK_OPEN
+        assert valve.is_open()
+
+    def test_stuck_closed_valve_stays_stuck_after_close(self):
+        """Closing a stuck-closed valve must not clear the stuck state."""
+        valve = Valve("srv_1", {"status": "stuck_closed"})
+        ok, msg = valve.close()
+        assert ok
+        assert valve.status == EquipmentStatus.STUCK_CLOSED
+        ok, msg = valve.open()
+        assert not ok, "Stuck-closed valve should still not open"
+        assert not valve.is_open()
+
+    def test_stuck_valve_pump_controls_do_not_unstick(self):
+        """start/stop/set_speed on a stuck valve must not clear the stuck state."""
+        for status, want_open in (("stuck_open", True), ("stuck_closed", False)):
+            valve = Valve("porv", {"status": status})
+            valve.stop()
+            valve.start()
+            valve.set_speed(0.0)
+            valve.stop()
+            assert valve.status == EquipmentStatus(status), status
+            assert valve.is_open() == want_open, status
+
     def test_block_valve_closes_normally(self):
         """Block valve should close normally (stopping flow despite stuck PORV)."""
         block = Valve("block_valve", {"status": "running", "position_pct": 100.0})
@@ -780,6 +813,27 @@ class TestScenarioIntegration:
         # Leak rate should now be zero
         leak = sim.equipment.get_porv_leak_rate(sim.state.coolant_pressure_mpa)
         assert leak == 0.0, f"Block valve should stop leak, got {leak} kg/s"
+
+    def test_tmi_porv_open_then_close_stays_stuck(self):
+        """Opening then closing the stuck PORV must not stop the leak."""
+        sim = self._make_sim("tmi_porv_stuck")
+        porv = sim.equipment.get("porv")
+        assert isinstance(porv, Valve)
+        porv.open()
+        porv.close()
+        assert porv.status == EquipmentStatus.STUCK_OPEN
+        assert porv.is_open()
+
+        initial_inventory = sim.state.coolant_inventory_fraction
+        for _ in range(5):
+            sim.advance()
+
+        leak = sim.equipment.get_porv_leak_rate(sim.state.coolant_pressure_mpa)
+        assert leak > 0.0, f"Stuck PORV should still leak, got {leak} kg/s"
+        assert sim.state.coolant_inventory_fraction < initial_inventory, (
+            f"Coolant should keep leaving: {initial_inventory} -> "
+            f"{sim.state.coolant_inventory_fraction}"
+        )
 
     def test_fukushima_battery_drains(self):
         """Fukushima batteries should drain toward depletion."""
