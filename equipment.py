@@ -120,7 +120,9 @@ class Valve(Equipment):
         if self.status in PERMANENT_FAILURE_STATES:
             return False, f"{self.id} is {self.status.value}"
         self.position_pct = 100.0
-        self.status = EquipmentStatus.RUNNING
+        # A stuck-open valve is already fully open and stays stuck.
+        if self.status != EquipmentStatus.STUCK_OPEN:
+            self.status = EquipmentStatus.RUNNING
         return True, f"{self.id} opened"
 
     def close(self) -> tuple[bool, str]:
@@ -129,8 +131,26 @@ class Valve(Equipment):
         if self.status in PERMANENT_FAILURE_STATES:
             return False, f"{self.id} is {self.status.value}"
         self.position_pct = 0.0
-        self.status = EquipmentStatus.STANDBY
+        # A stuck-closed valve is already fully closed and stays stuck.
+        if self.status != EquipmentStatus.STUCK_CLOSED:
+            self.status = EquipmentStatus.STANDBY
         return True, f"{self.id} closed"
+
+    # Pump/system controls on a valve must not bypass the stuck checks above.
+    def start(self) -> tuple[bool, str]:
+        if self.status in (EquipmentStatus.STUCK_OPEN, EquipmentStatus.STUCK_CLOSED):
+            return self.open()
+        return super().start()
+
+    def stop(self) -> tuple[bool, str]:
+        if self.status in (EquipmentStatus.STUCK_OPEN, EquipmentStatus.STUCK_CLOSED):
+            return self.close()
+        return super().stop()
+
+    def set_speed(self, speed_pct: float) -> tuple[bool, str]:
+        if self.status in (EquipmentStatus.STUCK_OPEN, EquipmentStatus.STUCK_CLOSED):
+            return self.set_position(speed_pct)
+        return super().set_speed(speed_pct)
 
     def set_position(self, position_pct: float) -> tuple[bool, str]:
         if self.status in (EquipmentStatus.STUCK_OPEN, EquipmentStatus.STUCK_CLOSED):
