@@ -18,7 +18,7 @@ from openreward.environments import Environment, JSONObject, TextBlock, ToolOutp
 
 from equipment import EquipmentStatus, Valve
 from reactor import ReactorSimulation, ReactorState
-from rewards import RewardCalculator
+from rewards import EpisodeResult, EpisodeTracker, RewardCalculator, simulate_passive
 from scenarios import ScenarioRegistry
 
 
@@ -99,6 +99,25 @@ class WaitParams(BaseModel, extra="forbid"):
     duration_steps: int = 1
 
 
+# The unattended episode is a pure function of the scenario (the seed only
+# changes instrument noise), so it is computed once per scenario per process.
+_PASSIVE_BASELINES: dict[str, EpisodeResult] = {}
+
+
+def passive_baseline(config: "TaskSpec") -> EpisodeResult:
+    key = json.dumps(config.model_dump(exclude={"id", "seed"}), sort_keys=True)
+    if key not in _PASSIVE_BASELINES:
+        _PASSIVE_BASELINES[key] = simulate_passive(
+            reactor_type=config.reactor_type,
+            initial_conditions=config.initial_conditions,
+            time_step_minutes=config.time_step_minutes,
+            max_steps=config.max_steps,
+            target_outcome=config.target_outcome,
+            difficulty=config.difficulty,
+        )
+    return _PASSIVE_BASELINES[key]
+
+
 # =============================================================================
 # Main Environment Class
 # =============================================================================
@@ -115,8 +134,9 @@ class NuclearPlantEnvironment(Environment):
         self.config = TaskSpec.model_validate(task_spec)
         self.sim: ReactorSimulation | None = None
         self.reward_calc: RewardCalculator | None = None
+        self.tracker: EpisodeTracker | None = None
+        self.baseline: EpisodeResult | None = None
         self.step_count = 0
-        self.cumulative_reward = 0.0
         self.prev_state: ReactorState | None = None
         self.action_log: list[dict] = []
         self.time_advanced_this_turn = False
@@ -130,12 +150,15 @@ class NuclearPlantEnvironment(Environment):
             difficulty=self.config.difficulty,
             seed=self.config.seed,
         )
+        self.baseline = passive_baseline(self.config)
         self.reward_calc = RewardCalculator(
             reactor_type=self.config.reactor_type,
             target_outcome=self.config.target_outcome,
+            time_step_minutes=self.config.time_step_minutes,
+            stability_start_step=self.baseline.steps,
         )
+        self.tracker = EpisodeTracker(self.reward_calc, self.config.max_steps)
         self.step_count = 0
-        self.cumulative_reward = 0.0
         self.prev_state = copy.deepcopy(self.sim.state)
         self.action_log = []
         self.time_advanced_this_turn = False
@@ -143,6 +166,7 @@ class NuclearPlantEnvironment(Environment):
     async def teardown(self) -> None:
         self.sim = None
         self.reward_calc = None
+        self.tracker = None
 
     async def get_prompt(self) -> List[TextBlock]:
         scenario = ScenarioRegistry.get(self.config.scenario)
@@ -163,6 +187,9 @@ class NuclearPlantEnvironment(Environment):
 ## Your Objective
 {self._objective_text()}
 
+## Scoring
+You are scored once, when the episode ends: the plant safety index (shown after every step, between -1 and +1) averaged over the full scenario duration, plus an outcome grade for the final plant state, minus the same score for the plant left completely unattended. Leaving the plant alone scores 0. If the episode ends early, its final state counts for the remaining time, so ending early or late gives no advantage by itself.
+
 ## Available Actions
 You have the following tools to operate the plant:
 
@@ -175,13 +202,13 @@ You have the following tools to operate the plant:
 7. **order_scram** — Emergency reactor shutdown (AZ-5 / SCRAM). Use with extreme caution.
 8. **vent_containment** — Vent containment pressure. Paths: "filtered", "unfiltered", "wetwell".
 9. **submit_log** — Document your reasoning (no effect on simulation).
-10. **wait** — Advance time without taking action. Use when the reactor is stable and no intervention is needed.
+10. **wait** — Advance time without taking action. Use when the reactor is stable and no intervention is needed. Set duration_steps to advance several steps in one call.
 
 ## Critical Information
 - Each action tool call (except observe_instruments and submit_log) advances the simulation by {self.config.time_step_minutes} minutes.
 - You have a maximum of {self.config.max_steps} action steps.
 - Instrument readings may be UNRELIABLE or MISLEADING — cross-reference multiple sources.
-- You must continue taking actions throughout the scenario. If no operational action is needed, use the **wait** tool to advance time and continue monitoring.
+- The scenario runs until it reaches a terminal state or {self.config.max_steps} steps ({self.config.max_steps * self.config.time_step_minutes:g} minutes). If no operational action is needed, use the **wait** tool to advance time and continue monitoring.
 
 ## Physics Notes for {self.config.reactor_type.upper()}
 {self._physics_notes()}
@@ -192,10 +219,22 @@ Begin by observing the instruments to assess the current situation."""
 
     def _objective_text(self) -> str:
         if self.config.target_outcome == "stabilize":
-            return (
+            text = (
                 "Stabilize the reactor: bring cladding temperatures below safety limits, "
                 "prevent fuel damage, contain radiation, and manage hydrogen. "
-                "Maintain stability for at least 30 minutes to succeed."
+            )
+            start_step = passive_baseline(self.config).steps
+            if start_step >= self.config.max_steps:
+                return text + (
+                    "This scenario runs for its full duration and is graded on the "
+                    "plant's condition throughout and at the end."
+                )
+            start_minutes = start_step * self.config.time_step_minutes
+            return text + (
+                f"Stability is assessed from minute {start_minutes:g} onward; the episode "
+                "ends in success once the plant then stays stable for 30 consecutive "
+                "simulated minutes (cladding below limit, fuel damage below 10%, "
+                "hydrogen below 4%, containment below design pressure)."
             )
         elif self.config.target_outcome == "maintain_power":
             return (
@@ -246,27 +285,42 @@ Begin by observing the instruments to assess the current situation."""
         }
         return notes.get(self.config.reactor_type, "No specific notes available.")
 
-    def _advance_time_and_get_output(self, action_name: str, action_detail: str) -> ToolOutput:
-        """Advance simulation, calculate reward, check terminal conditions."""
+    def _advance_time_and_get_output(
+        self, action_name: str, action_detail: str, n_steps: int = 1
+    ) -> ToolOutput:
+        """Advance the simulation, track the safety index, check terminal conditions.
+
+        The episode is scored once, when it ends: the safety index averaged
+        over the full horizon plus the terminal outcome, minus the same
+        quantity for the unattended plant. Intermediate steps carry no reward.
+        """
         assert self.sim is not None
         assert self.reward_calc is not None
+        assert self.tracker is not None
+        assert self.baseline is not None
         assert self.prev_state is not None
 
-        self.sim.advance()
-        self.step_count += 1
+        is_terminal, reason = False, ""
+        steps_taken = 0
+        safety_index = 0.0
+        for _ in range(max(1, n_steps)):
+            self.sim.advance()
+            self.step_count += 1
+            steps_taken += 1
+            state = self.sim.state
+            safety_index = self.tracker.record(state, self.prev_state)
+            is_terminal, reason = self.reward_calc.is_terminal(
+                state, self.step_count, self.config.max_steps
+            )
+            self.prev_state = copy.deepcopy(state)
+            if is_terminal:
+                break
 
-        state = self.sim.state
-        reward = self.reward_calc.step_reward(state, self.prev_state)
-        self.cumulative_reward += reward
-
-        is_terminal, reason = self.reward_calc.is_terminal(
-            state, self.step_count, self.config.max_steps
-        )
-
+        reward = 0.0
+        result: EpisodeResult | None = None
         if is_terminal:
-            terminal_r = self.reward_calc.terminal_reward(state)
-            reward += terminal_r
-            self.cumulative_reward += terminal_r
+            result = self.tracker.result(self.sim.state, reason)
+            reward = result.value - self.baseline.value
 
         # Get readings for display
         readings = self.sim.get_instrument_readings()
@@ -274,10 +328,13 @@ Begin by observing the instruments to assess the current situation."""
 
         # Action summary
         summary = f"\n--- ACTION: {action_name} ---\n{action_detail}\n"
+        if steps_taken > 1:
+            summary += f"Advanced {steps_taken} steps.\n"
         summary += f"Step: {self.step_count}/{self.config.max_steps}\n"
-        summary += f"Step Reward: {reward:+.3f} | Cumulative: {self.cumulative_reward:+.3f}\n"
+        summary += f"Plant safety index: {safety_index:+.3f}\n"
 
         if is_terminal:
+            assert result is not None
             summary += f"\n*** EPISODE ENDED: {reason.upper().replace('_', ' ')} ***\n"
             if reason == "stabilized":
                 summary += "Congratulations — reactor stabilized successfully!\n"
@@ -289,29 +346,41 @@ Begin by observing the instruments to assess the current situation."""
                 summary += "CATASTROPHIC FAILURE — Massive radiation release to environment.\n"
             elif reason == "max_steps_reached":
                 summary += "Maximum time steps reached. Scenario ended.\n"
+            summary += (
+                f"Mean safety index over the scenario: {result.mean_safety_index:+.3f} | "
+                f"Outcome: {result.outcome:+.2f}\n"
+                f"Unattended plant: {self.baseline.mean_safety_index:+.3f} | "
+                f"Outcome: {self.baseline.outcome:+.2f}\n"
+                f"Score (yours minus unattended): {reward:+.3f}\n"
+            )
 
         # Log action
         self.action_log.append({
             "step": self.step_count,
             "action": action_name,
             "detail": action_detail,
-            "reward": reward,
-            "cumulative_reward": self.cumulative_reward,
+            "safety_index": safety_index,
             "terminal": is_terminal,
             "reason": reason if is_terminal else None,
         })
 
-        # Update previous state
-        self.prev_state = copy.deepcopy(state)
+        metadata: dict[str, Any] = {
+            "step": self.step_count,
+            "safety_index": safety_index,
+            "terminal": is_terminal,
+            "reason": reason if is_terminal else None,
+        }
+        if result is not None:
+            metadata.update({
+                "score": reward,
+                "mean_safety_index": result.mean_safety_index,
+                "outcome": result.outcome,
+                "unattended_mean_safety_index": self.baseline.mean_safety_index,
+                "unattended_outcome": self.baseline.outcome,
+            })
 
         return ToolOutput(
-            metadata={
-                "step": self.step_count,
-                "reward": reward,
-                "cumulative_reward": self.cumulative_reward,
-                "terminal": is_terminal,
-                "reason": reason if is_terminal else None,
-            },
+            metadata=metadata,
             blocks=[TextBlock(text=summary + "\n" + display_text)],
             reward=reward,
             finished=is_terminal,
@@ -668,7 +737,6 @@ Begin by observing the instruments to assess the current situation."""
         vent = self.sim.equipment.get("containment_vent")
         if vent is None:
             # Create one if not present
-            from equipment import Valve
             vent = Valve("containment_vent", {"status": "running", "position_pct": 100.0})
             self.sim.equipment.equipment["containment_vent"] = vent
         else:
@@ -709,13 +777,16 @@ Begin by observing the instruments to assess the current situation."""
     @tool
     async def wait(self, params: WaitParams) -> ToolOutput:
         """Wait and monitor the reactor without taking any operational action.
-        Advances simulation time by one timestep. Use this when conditions are
-        stable and no intervention is needed.
+        Advances simulation time by duration_steps timesteps (default 1), stopping
+        early if the episode ends. Use this when conditions are stable and no
+        intervention is needed.
         """
         assert self.sim is not None
 
+        remaining = self.config.max_steps - self.step_count
+        n_steps = max(1, min(params.duration_steps, remaining))
         return self._advance_time_and_get_output(
-            "wait", "Monitoring — no operational action taken."
+            "wait", "Monitoring — no operational action taken.", n_steps=n_steps
         )
 
     # =========================================================================

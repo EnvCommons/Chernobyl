@@ -26,26 +26,28 @@ MIT
 
 ## Tasks
 
-There are 40 training tasks across 4 scenarios (each with 10 random seeds):
+There are 50 training tasks across 5 crisis scenarios (each with 10 random seeds). In each of them the plant fails or keeps degrading if left alone, so operator action makes a measurable difference:
 
-- **chernobyl_normal_ops** (RBMK) -- Steady 3200 MWt operation with random perturbations (pump trips, load changes). Maintain power safely.
-- **tmi_porv_stuck** (PWR) -- Post-scram. PORV stuck open but indicator shows closed. Diagnose the stuck valve and close the block valve to stop the LOCA.
-- **fukushima_blackout** (BWR) -- Post-tsunami station blackout on a generic BWR-4. All AC power lost, batteries draining, RCIC running on steam. Manage diminishing resources.
-- **windscale_anneal** (Windscale Pile) -- Ninth Wigner energy anneal with graphite temperature rising unexpectedly and thermocouple blind spots.
-
-There are 110 test tasks across all 11 scenarios (each with 10 random seeds). The additional test-only scenarios include:
-
-- **chernobyl_xenon_pit** (RBMK, hard) -- Power collapsed to 30 MWt with xenon building and most rods withdrawn.
-- **chernobyl_test_start** (RBMK, expert) -- Turbine test beginning at 200 MWt with ORM=6 and ECCS disabled.
-- **tmi_loss_of_coolant** (PWR, hard) -- Mid-event LOCA with operators having throttled HPI and core starting to uncover.
-- **tmi_recovery** (PWR, expert) -- Core 40% uncovered, cladding at 1100 C, hydrogen generating. Prevent complete meltdown.
+- **tmi_porv_stuck** (PWR, hard) -- Post-scram. PORV stuck open but indicator shows closed. Unattended, the core uncovers and hydrogen detonates after about two hours. Diagnose the stuck valve and close the block valve to stop the LOCA.
+- **tmi_recovery** (PWR, expert) -- Core 40% uncovered, cladding at 1100 C, hydrogen generating. Restore cooling before the cladding oxidizes.
 - **fukushima_rcic_failure** (BWR, expert) -- RCIC failed, batteries at 10%, must depressurize and establish low-pressure injection.
 - **fukushima_hydrogen** (BWR, expert) -- Core damage underway, H2 at 8% in containment, must vent while minimizing radiation release.
 - **windscale_fire** (Windscale, expert) -- Fire detected in pile, must choose between air (fans flames) or water (hydrogen/steam explosion risk).
 
+The seed only changes instrument noise; the plant physics of a scenario is deterministic.
+
+There are 110 test tasks across all 11 scenarios (each with 10 random seeds), including the five training scenarios. The additional test-only scenarios are:
+
+- **chernobyl_normal_ops** (RBMK) -- Steady 3200 MWt operation. Maintain power safely.
+- **chernobyl_xenon_pit** (RBMK, hard) -- Power collapsed to 30 MWt with xenon building and most rods withdrawn.
+- **chernobyl_test_start** (RBMK, expert) -- Turbine test beginning at 200 MWt with ORM=6 and ECCS disabled.
+- **tmi_loss_of_coolant** (PWR, hard) -- Mid-event LOCA with operators having throttled HPI and core starting to uncover.
+- **fukushima_blackout** (BWR) -- Post-tsunami station blackout on a generic BWR-4. All AC power lost, batteries draining, RCIC running on steam. Manage diminishing resources.
+- **windscale_anneal** (Windscale Pile) -- Ninth Wigner energy anneal with graphite temperature rising unexpectedly and thermocouple blind spots.
+
 ## Reward Structure
 
-This is a dense, verifiable reward environment. Rewards are calculated after each action based on five weighted safety components:
+This is a verifiable environment with a single reward at the end of each episode. After every time step the environment computes a plant safety index in [-1, 1] from five weighted components:
 
 | Component | Weight | Metric |
 |---|---|---|
@@ -55,7 +57,13 @@ This is a dense, verifiable reward environment. Rewards are calculated after eac
 | Fuel integrity | 0.15 | 1 - fuel damage fraction |
 | Hydrogen safety | 0.05 | H2 below flammability threshold (4 vol%) |
 
-Additional penalties apply for exceeding cladding temperature limits and worsening fuel damage. Terminal conditions (core meltdown, hydrogen detonation, catastrophic release, successful stabilization) provide additional terminal rewards from -1.0 to +1.0.
+Additional penalties apply for exceeding cladding temperature limits and worsening fuel damage. The index is shown to the agent after every step but is not itself a reward.
+
+When the episode ends, its value is the safety index averaged over the scenario's full horizon (max steps) plus a terminal outcome grade from -1.0 (core meltdown) to +1.0 (stabilized with negligible damage). If the episode ends before the horizon, the remaining steps are filled with the final state's index after a successful stabilization, and with -1 after a catastrophe (meltdown, hydrogen detonation, catastrophic release). Episode length therefore earns nothing by itself, while delaying a catastrophe is worth something.
+
+The reward is this value minus the value of the same scenario with the plant left unattended (computed deterministically at setup). An agent that only waits scores exactly 0; positive scores mean the operator did better than doing nothing. All intermediate steps have reward 0.
+
+Stabilization (the success terminal of the stabilize scenarios) requires 30 consecutive simulated minutes of stable plant state (cladding below limit, fuel damage below 10%, hydrogen below 4%, containment below design pressure), counted only after the step at which the unattended plant fails. A plant that starts out stable therefore cannot end the episode before its crisis would have developed. Scenarios whose unattended plant never fails run to their full horizon.
 
 We do not use LLM graders for this task.
 
@@ -78,11 +86,11 @@ Agents have 10 environment-specific tools:
 | `order_scram` | Yes | Emergency shutdown (AZ-5/SCRAM). Dangerous in RBMK with low ORM. |
 | `vent_containment` | Yes | Vent via filtered, unfiltered, or wetwell path. Reduces H2 risk but releases some radioactivity. |
 | `submit_log` | No | Document reasoning. No simulation effect. |
-| `wait` | Yes | Advance time without taking action. Use when monitoring stable conditions. |
+| `wait` | Yes | Advance time without taking action, `duration_steps` steps at once (default 1). Use when monitoring stable conditions. |
 
 ## Time Horizon
 
-Chernobyl scenarios range from 150 to 300 maximum steps, with timesteps from 15 seconds to 10 minutes depending on scenario urgency. Each time-advancing tool call advances the simulation by one timestep.
+Chernobyl scenarios range from 150 to 300 maximum steps, with timesteps from 15 seconds to 10 minutes depending on scenario urgency. Each time-advancing tool call advances the simulation by one timestep, except `wait`, which can advance several. Episodes end at a catastrophe, at stabilization, or at the maximum step count.
 
 ## Environment Difficulty
 

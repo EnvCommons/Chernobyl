@@ -625,13 +625,17 @@ class ReactorSimulation:
         s = self.state
         em = self.equipment
 
+        def reading(instrument: str, true_value: float, ndigits: int) -> float | str:
+            # A failed instrument may return a string (e.g. "OFFSCALE HIGH"),
+            # so read it once and round only numeric values.
+            value = em.get_instrument_reading(instrument, true_value, rng)
+            return round(value, ndigits) if isinstance(value, (int, float)) else value
+
         readings: dict[str, Any] = {}
 
         # -- Neutronics --
         readings["neutronics"] = {
-            "thermal_power_mw": round(em.get_instrument_reading(
-                "thermal_power", s.thermal_power_mw, rng
-            ), 1) if isinstance(em.get_instrument_reading("thermal_power", s.thermal_power_mw, rng), (int, float)) else em.get_instrument_reading("thermal_power", s.thermal_power_mw, rng),
+            "thermal_power_mw": reading("thermal_power", s.thermal_power_mw, 1),
             "power_pct": round(s.thermal_power_mw / self.params.rated_power_mw * 100, 1),
             "neutron_flux": "NORMAL" if 0.01 < s.neutron_population < 2.0 else (
                 "HIGH" if s.neutron_population >= 2.0 else "LOW"
@@ -645,12 +649,8 @@ class ReactorSimulation:
 
         # -- Thermal --
         readings["thermal"] = {
-            "fuel_temp_c": round(em.get_instrument_reading(
-                "fuel_temperature", s.fuel_temp_c, rng
-            ), 1) if isinstance(em.get_instrument_reading("fuel_temperature", s.fuel_temp_c, rng), (int, float)) else em.get_instrument_reading("fuel_temperature", s.fuel_temp_c, rng),
-            "cladding_temp_c": round(em.get_instrument_reading(
-                "core_exit_thermocouples", s.cladding_temp_c, rng
-            ), 1) if isinstance(em.get_instrument_reading("core_exit_thermocouples", s.cladding_temp_c, rng), (int, float)) else em.get_instrument_reading("core_exit_thermocouples", s.cladding_temp_c, rng),
+            "fuel_temp_c": reading("fuel_temperature", s.fuel_temp_c, 1),
+            "cladding_temp_c": reading("core_exit_thermocouples", s.cladding_temp_c, 1),
             "coolant_inlet_temp_c": round(s.coolant_inlet_temp_c, 1),
             "coolant_outlet_temp_c": round(s.coolant_outlet_temp_c, 1),
             "coolant_pressure_mpa": round(s.coolant_pressure_mpa, 2),
@@ -686,9 +686,7 @@ class ReactorSimulation:
             "pressure_mpa": round(s.containment_pressure_mpa, 3),
             "temperature_c": round(s.containment_temp_c, 1),
             "hydrogen_pct": round(s.containment_hydrogen_pct, 1),
-            "radiation_sv_hr": round(em.get_instrument_reading(
-                "containment_radiation", s.radiation_level_sv_hr, rng
-            ), 3) if isinstance(em.get_instrument_reading("containment_radiation", s.radiation_level_sv_hr, rng), (int, float)) else em.get_instrument_reading("containment_radiation", s.radiation_level_sv_hr, rng),
+            "radiation_sv_hr": reading("containment_radiation", s.radiation_level_sv_hr, 3),
         }
 
         # Windscale-specific

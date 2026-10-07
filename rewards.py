@@ -7,11 +7,12 @@ fuel integrity, and hydrogen safety.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any
 
 from physics import REACTOR_PARAMS, ReactorParams
-from reactor import ReactorState
+from reactor import ReactorSimulation, ReactorState
 
 
 @dataclass(frozen=True)
@@ -59,12 +60,22 @@ SAFETY_LIMITS: dict[str, SafetyLimits] = {
 class RewardCalculator:
     """Calculates rewards based on reactor state and safety criteria."""
 
-    def __init__(self, reactor_type: str, target_outcome: str) -> None:
+    def __init__(
+        self,
+        reactor_type: str,
+        target_outcome: str,
+        time_step_minutes: float = 1.0,
+        stability_start_step: int = 0,
+    ) -> None:
         self.reactor_type = reactor_type
         self.target_outcome = target_outcome
         self.limits = SAFETY_LIMITS[reactor_type]
-        self.stability_counter: int = 0
-        self.stability_threshold: int = 6  # Consecutive stable steps for success
+        self.time_step_minutes = time_step_minutes
+        # Stability only counts for steps after this one, so a plant that
+        # starts out stable cannot "stabilize" before its crisis develops.
+        self.stability_start_step = stability_start_step
+        self.stable_minutes: float = 0.0
+        self.stability_minutes_required: float = 30.0
 
     def step_reward(
         self,
@@ -206,12 +217,12 @@ class RewardCalculator:
                     or state.containment_pressure_mpa < self.limits.containment_pressure_limit
                 )
             )
-            if is_stable:
-                self.stability_counter += 1
-                if self.stability_counter >= self.stability_threshold:
+            if is_stable and step_count > self.stability_start_step:
+                self.stable_minutes += self.time_step_minutes
+                if self.stable_minutes >= self.stability_minutes_required:
                     return True, "stabilized"
             else:
-                self.stability_counter = 0
+                self.stable_minutes = 0.0
 
         return False, ""
 
@@ -251,3 +262,91 @@ class RewardCalculator:
             "hydrogen_safety": round(h2_score, 3),
             "total_step_reward": round(self.step_reward(state, prev_state), 3),
         }
+
+
+@dataclass(frozen=True)
+class EpisodeResult:
+    """Length-independent summary of one episode."""
+    mean_safety_index: float  # Step safety index averaged over the full horizon
+    outcome: float            # Terminal outcome grade
+    steps: int
+    reason: str
+
+    @property
+    def value(self) -> float:
+        return self.mean_safety_index + self.outcome
+
+
+CATASTROPHIC_REASONS = frozenset({"core_meltdown", "hydrogen_detonation", "catastrophic_release"})
+
+
+class EpisodeTracker:
+    """Accumulates the step safety index and scores the finished episode.
+
+    The safety index is averaged over the scenario's full horizon (max_steps).
+    An episode that ends early is padded to the full horizon: a stabilized
+    plant with the index of its final state, so ending early neither gains nor
+    loses anything; a plant lost to a catastrophe with the index's floor (-1),
+    so the longer the plant survives before a catastrophe, the higher the score.
+    """
+
+    def __init__(self, calc: RewardCalculator, max_steps: int) -> None:
+        self.calc = calc
+        self.max_steps = max_steps
+        self.steps = 0
+        self.safety_index_sum = 0.0
+
+    def record(self, state: ReactorState, prev_state: ReactorState) -> float:
+        safety_index = self.calc.step_reward(state, prev_state)
+        self.safety_index_sum += safety_index
+        self.steps += 1
+        return safety_index
+
+    def result(self, final_state: ReactorState, reason: str) -> EpisodeResult:
+        remaining = max(0, self.max_steps - self.steps)
+        if reason in CATASTROPHIC_REASONS:
+            pad = -1.0
+        else:
+            pad = self.calc.step_reward(final_state, final_state)
+        mean = (self.safety_index_sum + remaining * pad) / self.max_steps
+        return EpisodeResult(
+            mean_safety_index=mean,
+            outcome=self.calc.terminal_reward(final_state),
+            steps=self.steps,
+            reason=reason,
+        )
+
+
+def simulate_passive(
+    reactor_type: str,
+    initial_conditions: dict[str, Any],
+    time_step_minutes: float,
+    max_steps: int,
+    target_outcome: str,
+    difficulty: str = "normal",
+) -> EpisodeResult:
+    """Run a scenario to its end with no operator action.
+
+    The plant physics is deterministic (the seed only affects instrument
+    noise), so this is exactly the episode an agent that only waits gets.
+    The passive plant is never allowed to "stabilize": its end step is the
+    point after which an operator's stability starts to count.
+    """
+    sim = ReactorSimulation(
+        reactor_type=reactor_type,
+        initial_conditions=copy.deepcopy(initial_conditions),
+        time_step_minutes=time_step_minutes,
+        difficulty=difficulty,
+    )
+    calc = RewardCalculator(
+        reactor_type, target_outcome, time_step_minutes, stability_start_step=max_steps
+    )
+    tracker = EpisodeTracker(calc, max_steps)
+    prev_state = copy.deepcopy(sim.state)
+    while True:
+        sim.advance()
+        tracker.record(sim.state, prev_state)
+        is_terminal, reason = calc.is_terminal(sim.state, tracker.steps, max_steps)
+        if is_terminal:
+            return tracker.result(sim.state, reason)
+        prev_state = copy.deepcopy(sim.state)
