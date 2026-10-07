@@ -870,11 +870,14 @@ ALL_SCENARIOS: dict[str, Scenario] = {
     "windscale_fire": WINDSCALE_FIRE,
 }
 
+# Scenarios in which the unattended plant fails or degrades, so operator
+# action can be scored against doing nothing.
 TRAIN_SCENARIOS = [
-    "chernobyl_normal_ops",
     "tmi_porv_stuck",
-    "fukushima_blackout",
-    "windscale_anneal",
+    "tmi_recovery",
+    "fukushima_rcic_failure",
+    "fukushima_hydrogen",
+    "windscale_fire",
 ]
 
 TEST_SCENARIOS = list(ALL_SCENARIOS.keys())

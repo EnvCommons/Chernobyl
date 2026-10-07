@@ -674,7 +674,7 @@ class TestScenarios:
     def test_train_tasks_count(self):
         """Train split should have expected number of tasks."""
         tasks = ScenarioRegistry.list_tasks("train")
-        assert len(tasks) == len(TRAIN_SCENARIOS) * 10  # 4 scenarios * 10 seeds
+        assert len(tasks) == len(TRAIN_SCENARIOS) * 10  # 5 scenarios * 10 seeds
 
     def test_test_tasks_count(self):
         """Test split should have expected number of tasks."""
@@ -1602,25 +1602,40 @@ class TestTerminalConditions:
         is_term, reason = calc.is_terminal(state, 10, 200)
         assert is_term and reason == "catastrophic_release"
 
-    def test_stabilized_after_consecutive_stable_steps(self):
-        """6 consecutive stable steps → terminal='stabilized', reward=+1.0.
-        Ref: Stability threshold defined in rewards.py:67.
+    def test_stabilized_after_30_stable_minutes(self):
+        """30 consecutive stable simulated minutes → terminal='stabilized', reward=+1.0.
+        With 5-minute steps that is the 6th stable step.
         """
-        calc = RewardCalculator("pwr", "stabilize")
+        calc = RewardCalculator("pwr", "stabilize", time_step_minutes=5.0)
         state = ReactorState()
         state.cladding_temp_c = 350.0
         state.fuel_damage_fraction = 0.01
         state.containment_hydrogen_pct = 1.0
         state.containment_pressure_mpa = 0.2
 
-        for step in range(10):
+        for step in range(1, 11):
             is_term, reason = calc.is_terminal(state, step, 200)
             if is_term:
                 assert reason == "stabilized"
+                assert step == 6
                 assert calc.terminal_reward(state) == 1.0
                 return
 
-        pytest.fail("Should have reached 'stabilized' terminal after 6+ stable steps")
+        pytest.fail("Should have reached 'stabilized' terminal after 30 stable minutes")
+
+    def test_stability_not_counted_before_start_step(self):
+        """Stable steps up to the stability start step do not count."""
+        calc = RewardCalculator(
+            "pwr", "stabilize", time_step_minutes=5.0, stability_start_step=20
+        )
+        state = ReactorState()
+        state.cladding_temp_c = 350.0
+
+        for step in range(1, 21):
+            is_term, _ = calc.is_terminal(state, step, 200)
+            assert not is_term, f"Stabilized at step {step}, before the start step"
+        reasons = [calc.is_terminal(state, step, 200)[1] for step in range(21, 27)]
+        assert reasons == ["", "", "", "", "", "stabilized"]
 
     def test_max_steps_terminal(self):
         """Reaching max_steps → terminal='max_steps_reached'.
@@ -1869,12 +1884,12 @@ class TestParameterCitations:
 class TestTaskEnumeration:
     """Verify task counts and splits match README documentation."""
 
-    def test_train_split_40_tasks(self):
-        """Train split has 40 tasks (4 scenarios × 10 seeds).
-        Ref: README.md "40 training tasks across 4 scenarios".
+    def test_train_split_50_tasks(self):
+        """Train split has 50 tasks (5 scenarios × 10 seeds).
+        Ref: README.md "50 training tasks across 5 scenarios".
         """
         tasks = ScenarioRegistry.list_tasks("train")
-        assert len(tasks) == 40, f"Expected 40 train tasks, got {len(tasks)}"
+        assert len(tasks) == 50, f"Expected 50 train tasks, got {len(tasks)}"
 
     def test_test_split_110_tasks(self):
         """Test split has 110 tasks (11 scenarios × 10 seeds).
@@ -1900,7 +1915,7 @@ class TestTaskEnumeration:
         train_ids = {t["id"] for t in ScenarioRegistry.list_tasks("train")}
         test_ids = {t["id"] for t in ScenarioRegistry.list_tasks("test")}
         # Train tasks should have unique IDs
-        assert len(train_ids) == 40
+        assert len(train_ids) == 50
         # Test tasks should have unique IDs
         assert len(test_ids) == 110
 
