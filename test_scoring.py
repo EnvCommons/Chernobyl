@@ -123,7 +123,8 @@ async def test_only_the_final_step_is_rewarded(scenario):
 @pytest.mark.asyncio
 async def test_start_stable_plant_does_not_stabilize_while_waiting():
     # The TMI plant looks stable until the stuck PORV has drained the core.
-    _, out, env = await _play("tmi_porv_stuck", [])
+    # Seed 1 takes over at minute 0.
+    _, out, env = await _play("tmi_porv_stuck", [], seed=1)
     assert out.metadata["reason"] != "stabilized"
     assert env.step_count > 100
 
@@ -132,9 +133,86 @@ async def test_start_stable_plant_does_not_stabilize_while_waiting():
 async def test_stabilization_counts_only_after_unattended_failure_point():
     rewards, out, env = await _play("tmi_porv_stuck", PROCEDURES["tmi_porv_stuck"])
     assert out.metadata["reason"] == "stabilized"
-    # The unattended plant fails at step 129 (1-minute steps); success then
-    # needs 30 further stable minutes.
-    assert env.step_count == 129 + 30
+    # The unattended plant fails 129 minutes into the transient; seed 0 takes
+    # over at minute 90. Success then needs 30 further stable minutes.
+    assert env.baseline.steps == 129 - 90
+    assert env.step_count == env.baseline.steps + 30
+
+
+def _porv_variant(seed: int) -> tuple[int, bool]:
+    ic = _task("tmi_porv_stuck", seed)["initial_conditions"]
+    stuck = ic["equipment"]["block_valve"]["status"] == "stuck_open"
+    return ic.get("unattended_minutes", 0), stuck
+
+
+@pytest.mark.asyncio
+async def test_porv_stability_start_is_on_the_plant_clock():
+    # Seed 4 takes over at minute 110; the unattended plant fails at minute 129.
+    env = N.NuclearPlantEnvironment(task_spec=_task("tmi_porv_stuck", 4))
+    await env.setup()
+    prompt = (await env.get_prompt())[0].text
+    assert "Stability is assessed from minute 129 onward" in prompt
+    readings = env.sim.get_instrument_readings()
+    assert readings["time"]["elapsed_minutes"] == 110.0
+
+
+def test_porv_seeds_vary_takeover_time_and_block_valve():
+    variants = {_porv_variant(seed) for seed in range(10)}
+    assert len(variants) == 10
+    assert any(stuck for _, stuck in variants)
+    assert any(not stuck and minutes >= 90 for minutes, stuck in variants)
+
+
+def test_takeover_time_is_the_unattended_plant_at_that_minute():
+    from reactor import ReactorSimulation
+    from scenarios import ALL_SCENARIOS
+
+    scenario = ALL_SCENARIOS["tmi_porv_stuck"]
+    late = ReactorSimulation(
+        "pwr", {**scenario.initial_conditions, "unattended_minutes": 45}, 1.0
+    )
+    plain = ReactorSimulation("pwr", scenario.initial_conditions, 1.0)
+    for _ in range(45):
+        plain.advance()
+    assert late.state == plain.state
+
+
+INJECT = ("inject_coolant", {"source": "borated_water", "flow_rate_kg_s": 30.0})
+CLOSE_BLOCK = ("operate_valve", {"valve_id": "block_valve", "action": "close"})
+START_RCPS = [("operate_pump", {"pump_id": f"rcp_{i}", "action": "start"}) for i in range(1, 5)]
+
+
+@pytest.mark.asyncio
+async def test_porv_block_valve_stuck_needs_makeup_injection():
+    # Seed 1: block valve stuck open, so isolating the leak is impossible.
+    assert _porv_variant(1) == (0, True)
+    isolate, _, _ = await _play("tmi_porv_stuck", [CLOSE_BLOCK] + START_RCPS, seed=1)
+    makeup, out, _ = await _play("tmi_porv_stuck", [INJECT, CLOSE_BLOCK] + START_RCPS, seed=1)
+    assert sum(isolate) < 0.1
+    assert out.metadata["reason"] == "stabilized"
+    assert sum(makeup) > 2.0
+
+
+@pytest.mark.asyncio
+async def test_porv_late_takeover_rewards_inventory_makeup():
+    # Seed 4: takeover at minute 110, block valve works but the core is heating.
+    assert _porv_variant(4) == (110, False)
+    isolate, _, _ = await _play("tmi_porv_stuck", [CLOSE_BLOCK] + START_RCPS, seed=4)
+    makeup, _, _ = await _play("tmi_porv_stuck", [INJECT, CLOSE_BLOCK] + START_RCPS, seed=4)
+    late, _, _ = await _play(
+        "tmi_porv_stuck", [("wait", {"duration_steps": 10}), CLOSE_BLOCK] + START_RCPS, seed=4
+    )
+    assert sum(makeup) > sum(isolate) + 0.05
+    assert sum(isolate) > sum(late)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seed", range(10))
+async def test_porv_scores_stay_within_scale(seed):
+    for actions in ([], [INJECT, CLOSE_BLOCK] + START_RCPS,
+                    [("operate_pump", {"pump_id": "hpi_1", "action": "stop"})]):
+        rewards, _, _ = await _play("tmi_porv_stuck", actions, seed=seed)
+        assert -4.0 <= sum(rewards) <= 4.0
 
 
 def _healthy_state() -> ReactorState:

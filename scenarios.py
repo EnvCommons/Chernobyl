@@ -7,6 +7,7 @@ match historical records as closely as possible.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,6 +24,19 @@ class Scenario:
     target_outcome: str
     description: str
     initial_conditions: dict[str, Any]
+    # Per-seed variants. Each one may set "unattended_minutes" (how long the
+    # transient has run before the operator takes over) and override
+    # equipment, so the right response differs between seeds.
+    variants: list[dict[str, Any]] = field(default_factory=list)
+
+    def initial_conditions_for(self, seed: int) -> dict[str, Any]:
+        if not self.variants:
+            return self.initial_conditions
+        variant = self.variants[seed % len(self.variants)]
+        conditions = copy.deepcopy(self.initial_conditions)
+        conditions["equipment"].update(copy.deepcopy(variant.get("equipment", {})))
+        conditions["unattended_minutes"] = variant.get("unattended_minutes", 0)
+        return conditions
 
 
 # =============================================================================
@@ -273,8 +287,10 @@ TMI_PORV_STUCK = Scenario(
         "are running but operators historically throttled them because the "
         "pressurizer level was RISING (misleadingly, due to void formation). "
         "You must diagnose the stuck PORV — look for indirect evidence like PORV "
-        "tailpipe temperature, falling pressure despite 'closed' PORV — and close "
-        "the block valve upstream."
+        "tailpipe temperature, falling pressure despite 'closed' PORV — and stop "
+        "the loss of coolant before the core uncovers. You take over the control "
+        "room at the time shown on the plant clock: the leak may already have "
+        "been running for a while, and not every component may respond as designed."
     ),
     initial_conditions={
         "thermal_power_mw": 0.0,
@@ -331,6 +347,22 @@ TMI_PORV_STUCK = Scenario(
             {"instrument": "porv_position", "failure": "reads_closed_when_open"},
         ],
     },
+    # Takeover time and block valve condition by seed. A late takeover needs
+    # the lost inventory made up, not just the leak isolated; a block valve
+    # stuck open cannot isolate the leak at all, so only makeup injection
+    # saves the core.
+    variants=[
+        {"unattended_minutes": 90},
+        {"unattended_minutes": 0, "equipment": {"block_valve": {"status": "stuck_open"}}},
+        {"unattended_minutes": 100},
+        {"unattended_minutes": 60, "equipment": {"block_valve": {"status": "stuck_open"}}},
+        {"unattended_minutes": 110},
+        {"unattended_minutes": 30, "equipment": {"block_valve": {"status": "stuck_open"}}},
+        {"unattended_minutes": 105},
+        {"unattended_minutes": 90, "equipment": {"block_valve": {"status": "stuck_open"}}},
+        {"unattended_minutes": 95},
+        {"unattended_minutes": 110, "equipment": {"block_valve": {"status": "stuck_open"}}},
+    ],
 )
 
 TMI_LOSS_OF_COOLANT = Scenario(
@@ -920,7 +952,7 @@ class ScenarioRegistry:
                     "scenario": scenario_name,
                     "reactor_type": scenario.reactor_type,
                     "difficulty": scenario.difficulty,
-                    "initial_conditions": scenario.initial_conditions,
+                    "initial_conditions": scenario.initial_conditions_for(seed),
                     "time_step_minutes": scenario.time_step_minutes,
                     "max_steps": scenario.max_steps,
                     "target_outcome": scenario.target_outcome,

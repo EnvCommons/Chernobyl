@@ -177,6 +177,14 @@ class ReactorSimulation:
         self.wigner = WignerEnergyModel()
         self.pressurizer = PressurizerModel()
 
+        # A scenario can start partway into its transient: the plant first
+        # runs unattended up to the operator's takeover time.
+        unattended_steps = round(
+            initial_conditions.get("unattended_minutes", 0) / time_step_minutes
+        )
+        for _ in range(unattended_steps):
+            self.advance()
+
     def _coupled_power_update(
         self,
         dt: float,

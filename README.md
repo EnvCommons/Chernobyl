@@ -28,13 +28,13 @@ MIT
 
 There are 50 training tasks across 5 crisis scenarios (each with 10 random seeds). In each of them the plant fails or keeps degrading if left alone, so operator action makes a measurable difference:
 
-- **tmi_porv_stuck** (PWR, hard) -- Post-scram. PORV stuck open but indicator shows closed. Unattended, the core uncovers and hydrogen detonates after about two hours. Diagnose the stuck valve and close the block valve to stop the LOCA.
+- **tmi_porv_stuck** (PWR, hard) -- Post-scram. PORV stuck open but indicator shows closed. Unattended, the core uncovers and hydrogen detonates about two hours into the transient. The seed sets when the operator takes over (minute 0 to 110) and whether the block valve can be closed: a late takeover also needs the lost inventory made up, and a block valve stuck open leaves makeup injection as the only way to save the core.
 - **tmi_recovery** (PWR, expert) -- Core 40% uncovered, cladding at 1100 C, hydrogen generating. Restore cooling before the cladding oxidizes.
 - **fukushima_rcic_failure** (BWR, expert) -- RCIC failed, batteries at 10%, must depressurize and establish low-pressure injection.
 - **fukushima_hydrogen** (BWR, expert) -- Core damage underway, H2 at 8% in containment, must vent while minimizing radiation release.
 - **windscale_fire** (Windscale, expert) -- Fire detected in pile, must choose between air (fans flames) or water (hydrogen/steam explosion risk).
 
-The seed only changes instrument noise; the plant physics of a scenario is deterministic.
+Apart from tmi_porv_stuck, the seed only changes instrument noise; the plant physics of a scenario is deterministic.
 
 There are 110 test tasks across all 11 scenarios (each with 10 random seeds), including the five training scenarios. The additional test-only scenarios are:
 
