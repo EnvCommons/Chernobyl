@@ -229,7 +229,11 @@ Begin by observing the instruments to assess the current situation."""
                     "This scenario runs for its full duration and is graded on the "
                     "plant's condition throughout and at the end."
                 )
-            start_minutes = start_step * self.config.time_step_minutes
+            # Minutes on the plant clock, which starts at the takeover time.
+            start_minutes = (
+                self.config.initial_conditions.get("unattended_minutes", 0)
+                + start_step * self.config.time_step_minutes
+            )
             return text + (
                 f"Stability is assessed from minute {start_minutes:g} onward; the episode "
                 "ends in success once the plant then stays stable for 30 consecutive "
