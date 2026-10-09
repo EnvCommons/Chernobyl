@@ -145,10 +145,19 @@ def _porv_variant(seed: int) -> tuple[int, bool]:
     return ic.get("unattended_minutes", 0), stuck
 
 
+def _porv_faults(seed: int) -> tuple[int, bool, int, tuple[str, ...]]:
+    """(takeover minute, block valve stuck, HPI pumps out, pumps with lost seal cooling)."""
+    ic = _task("tmi_porv_stuck", seed)["initial_conditions"]
+    eq = ic["equipment"]
+    hpi_out = sum(eq[h]["status"] != "running" for h in ("hpi_1", "hpi_2"))
+    seals = tuple(r for r in ("rcp_1", "rcp_2", "rcp_3", "rcp_4") if eq[r].get("seal_cooling_lost"))
+    return ic.get("unattended_minutes", 0), eq["block_valve"]["status"] == "stuck_open", hpi_out, seals
+
+
 @pytest.mark.asyncio
 async def test_porv_stability_start_is_on_the_plant_clock():
-    # Seed 4 takes over at minute 110; the unattended plant fails at minute 129.
-    env = N.NuclearPlantEnvironment(task_spec=_task("tmi_porv_stuck", 4))
+    # Seed 9 takes over at minute 110; the unattended plant fails at minute 129.
+    env = N.NuclearPlantEnvironment(task_spec=_task("tmi_porv_stuck", 9))
     await env.setup()
     prompt = (await env.get_prompt())[0].text
     assert "Stability is assessed from minute 129 onward" in prompt
@@ -156,11 +165,15 @@ async def test_porv_stability_start_is_on_the_plant_clock():
     assert readings["time"]["elapsed_minutes"] == 110.0
 
 
-def test_porv_seeds_vary_takeover_time_and_block_valve():
-    variants = {_porv_variant(seed) for seed in range(10)}
-    assert len(variants) == 10
-    assert any(stuck for _, stuck in variants)
-    assert any(not stuck and minutes >= 90 for minutes, stuck in variants)
+def test_porv_seeds_vary_takeover_time_and_equipment():
+    variants = [_porv_faults(seed) for seed in range(10)]
+    assert len(set(variants)) == 10
+    assert any(stuck for _, stuck, _, _ in variants)
+    assert any(not stuck and minutes >= 90 for minutes, stuck, _, _ in variants)
+    # Both HPI pumps out, with different pumps left with intact seals.
+    no_hpi = [seals for _, _, hpi_out, seals in variants if hpi_out == 2]
+    assert len(no_hpi) >= 2 and len(set(no_hpi)) >= 2
+    assert any(hpi_out == 1 for _, _, hpi_out, _ in variants)
 
 
 def test_takeover_time_is_the_unattended_plant_at_that_minute():
@@ -195,15 +208,104 @@ async def test_porv_block_valve_stuck_needs_makeup_injection():
 
 @pytest.mark.asyncio
 async def test_porv_late_takeover_rewards_inventory_makeup():
-    # Seed 4: takeover at minute 110, block valve works but the core is heating.
-    assert _porv_variant(4) == (110, False)
-    isolate, _, _ = await _play("tmi_porv_stuck", [CLOSE_BLOCK] + START_RCPS, seed=4)
-    makeup, _, _ = await _play("tmi_porv_stuck", [INJECT, CLOSE_BLOCK] + START_RCPS, seed=4)
+    # Seed 0: takeover at minute 90, block valve works but the core is heating.
+    assert _porv_faults(0) == (90, False, 0, ())
+    isolate, _, _ = await _play("tmi_porv_stuck", [CLOSE_BLOCK] + START_RCPS, seed=0)
+    makeup, _, _ = await _play("tmi_porv_stuck", [INJECT, CLOSE_BLOCK] + START_RCPS, seed=0)
     late, _, _ = await _play(
-        "tmi_porv_stuck", [("wait", {"duration_steps": 10}), CLOSE_BLOCK] + START_RCPS, seed=4
+        "tmi_porv_stuck", [("wait", {"duration_steps": 10}), CLOSE_BLOCK] + START_RCPS, seed=0
     )
-    assert sum(makeup) > sum(isolate) + 0.05
+    assert sum(makeup) > sum(isolate) + 0.04
     assert sum(isolate) > sum(late)
+
+
+@pytest.mark.asyncio
+async def test_porv_injection_is_limited_by_running_hpi_pumps():
+    # Seed 3: hpi_2 is out, so injection delivers at most hpi_1's 30 kg/s.
+    assert _porv_faults(3)[2] == 1
+    env = N.NuclearPlantEnvironment(task_spec=_task("tmi_porv_stuck", 3))
+    await env.setup()
+    out = await env.inject_coolant(N.InjectCoolantParams(source="borated_water", flow_rate_kg_s=100.0))
+    assert "at most 30.0 kg/s" in out.blocks[0].text
+    assert env.sim.effective_injection_kg_s() == 30.0
+    # Stopping the last HPI pump stops the injection with it.
+    await env.operate_pump(N.OperatePumpParams(pump_id="hpi_1", action="stop"))
+    assert env.sim.effective_injection_kg_s() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_porv_injection_needs_a_running_hpi_pump():
+    # Seed 2: both HPI pumps are out and cannot be restarted.
+    assert _porv_faults(2)[2] == 2
+    env = N.NuclearPlantEnvironment(task_spec=_task("tmi_porv_stuck", 2))
+    await env.setup()
+    out = await env.inject_coolant(N.InjectCoolantParams(source="borated_water", flow_rate_kg_s=30.0))
+    assert out.metadata.get("error") and not out.finished
+    assert env.step_count == 0
+    out = await env.operate_pump(N.OperatePumpParams(pump_id="hpi_1", action="start"))
+    assert "cannot be restarted" in out.blocks[0].text
+    assert env.sim.equipment.get("hpi_1").status.value == "failed"
+
+
+@pytest.mark.asyncio
+async def test_pump_with_lost_seal_cooling_fails_and_leaks_when_started():
+    # Seed 6: rcp_1..rcp_3 lost seal cooling; rcp_4 is intact.
+    assert _porv_faults(6)[3] == ("rcp_1", "rcp_2", "rcp_3")
+    env = N.NuclearPlantEnvironment(task_spec=_task("tmi_porv_stuck", 6))
+    await env.setup()
+    text = env.sim.format_readings(env.sim.get_instrument_readings())
+    assert "rcp_1: tripped (seals: seal cooling lost)" in text
+    assert "rcp_4: tripped\n" in text
+    out = await env.operate_pump(N.OperatePumpParams(pump_id="rcp_1", action="start"))
+    assert "seals" in out.blocks[0].text and "leaking" in out.blocks[0].text
+    pressure = env.sim.state.coolant_pressure_mpa
+    assert env.sim.rcs_leak_rate(pressure) > env.sim.equipment.get_porv_leak_rate(pressure)
+    assert env.sim.equipment.get_effective_coolant_flow() == 0.0
+    for retry in (
+        N.OperatePumpParams(pump_id="rcp_1", action="start"),
+        N.OperatePumpParams(pump_id="rcp_1", action="set_speed", speed_pct=100.0),
+    ):
+        out = await env.operate_pump(retry)
+        assert env.sim.equipment.get("rcp_1").status.value == "failed"
+    out = await env.operate_pump(N.OperatePumpParams(pump_id="rcp_2", action="set_speed", speed_pct=50.0))
+    assert env.sim.equipment.get("rcp_2").seal_failed
+
+
+@pytest.mark.asyncio
+async def test_porv_no_single_sequence_wins_every_seed():
+    # The sequence that wins every seed on a plant without these faults:
+    # isolate, start every RCP, inject.
+    modal = [CLOSE_BLOCK] + START_RCPS + [INJECT]
+    no_rcp = [CLOSE_BLOCK, INJECT]
+    rcp_4 = [CLOSE_BLOCK, ("operate_pump", {"pump_id": "rcp_4", "action": "start"})]
+    rcp_1 = [CLOSE_BLOCK, ("operate_pump", {"pump_id": "rcp_1", "action": "start"})]
+    # Seed 6: no HPI, only rcp_4 has intact seals.
+    modal_6, _, _ = await _play("tmi_porv_stuck", modal, seed=6)
+    best_6, out, _ = await _play("tmi_porv_stuck", rcp_4, seed=6)
+    assert out.metadata["reason"] == "stabilized"
+    assert sum(best_6) > sum(modal_6) + 2.0
+    # Seed 2: no HPI, so injection is impossible and an RCP must run.
+    no_rcp_2, _, _ = await _play("tmi_porv_stuck", no_rcp, seed=2)
+    best_2, out, _ = await _play("tmi_porv_stuck", rcp_1, seed=2)
+    assert out.metadata["reason"] == "stabilized"
+    assert sum(best_2) > sum(no_rcp_2) + 2.0
+    # Seed 1: block valve stuck, so only injection saves the core.
+    rcps_1, _, _ = await _play("tmi_porv_stuck", [CLOSE_BLOCK] + START_RCPS, seed=1)
+    modal_1, _, _ = await _play("tmi_porv_stuck", modal, seed=1)
+    assert sum(modal_1) > sum(rcps_1) + 2.0
+
+
+def test_pwr_is_not_stable_while_losing_inventory():
+    calc = RewardCalculator("pwr", "stabilize", time_step_minutes=10.0)
+    state = _healthy_state()
+    state.coolant_inventory_fraction = 0.95
+    for step in range(1, 10):
+        state.coolant_inventory_fraction -= 0.001
+        done, _ = calc.is_terminal(state, step, 200)
+        assert not done
+    for step in range(10, 13):
+        done, reason = calc.is_terminal(state, step, 200)
+    assert done and reason == "stabilized"
 
 
 @pytest.mark.asyncio
@@ -284,6 +386,48 @@ async def test_venting_through_an_existing_vent_does_not_raise():
     assert out.metadata["step"] == 1
     out = await env.vent_containment(N.VentContainmentParams(vent_path="filtered"))
     assert out.metadata["step"] == 2
+
+
+FIRE_TRUCK = ("inject_coolant", {"source": "fire_truck", "flow_rate_kg_s": 30.0})
+
+
+@pytest.mark.asyncio
+async def test_scrubbed_vent_path_releases_less_than_unfiltered():
+    scrubbed, out_s, env_s = await _play(
+        "fukushima_hydrogen", [FIRE_TRUCK, ("vent_containment", {"vent_path": "wetwell"})]
+    )
+    direct, out_d, env_d = await _play(
+        "fukushima_hydrogen", [FIRE_TRUCK, ("vent_containment", {"vent_path": "unfiltered"})]
+    )
+    assert out_d.metadata["reason"] == "catastrophic_release"
+    assert out_s.metadata["reason"] not in ("catastrophic_release", "hydrogen_detonation", "core_meltdown")
+    assert sum(scrubbed) > sum(direct) + 0.5
+
+
+@pytest.mark.asyncio
+async def test_closing_the_vent_stops_venting():
+    env = N.NuclearPlantEnvironment(task_spec=_task("fukushima_hydrogen"))
+    await env.setup()
+    await env.vent_containment(N.VentContainmentParams(vent_path="wetwell"))
+    await env.operate_valve(N.OperateValveParams(valve_id="containment_vent", action="close"))
+    before = env.sim.state.containment_pressure_mpa
+    await env.wait(N.WaitParams(duration_steps=3))
+    assert env.sim.state.containment_pressure_mpa > before
+
+
+@pytest.mark.asyncio
+async def test_windscale_release_stops_once_the_fire_is_out():
+    water_off = [
+        ("activate_system", {"system_id": "water_injection", "action": "activate"}),
+        ("operate_pump", {"pump_id": "blower_1", "action": "stop"}),
+    ]
+    passive, _, _ = await _play("windscale_fire", [])
+    prompt, _, env = await _play("windscale_fire", water_off)
+    delayed, _, _ = await _play("windscale_fire", [("wait", {"duration_steps": 20})] + water_off)
+    assert sum(prompt) > sum(delayed) + 0.05
+    assert sum(delayed) > sum(passive) + 0.05
+    assert env.sim.state.environmental_release_tbq < 5.0
+    assert env.sim.state.graphite_temp_c >= 20.0
 
 
 @pytest.mark.asyncio

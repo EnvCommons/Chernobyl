@@ -76,6 +76,7 @@ class RewardCalculator:
         self.stability_start_step = stability_start_step
         self.stable_minutes: float = 0.0
         self.stability_minutes_required: float = 30.0
+        self._last_inventory: float | None = None
 
     def step_reward(
         self,
@@ -208,8 +209,17 @@ class RewardCalculator:
 
         # Check for stability (success condition for stabilize scenarios)
         if self.target_outcome == "stabilize":
+            # A PWR that is still losing coolant inventory is not stable, even
+            # while its core is still covered.
+            inventory_holding = (
+                self.reactor_type != "pwr"
+                or self._last_inventory is None
+                or state.coolant_inventory_fraction >= self._last_inventory
+            )
+            self._last_inventory = state.coolant_inventory_fraction
             is_stable = (
-                state.cladding_temp_c < self.limits.clad_temp_limit
+                inventory_holding
+                and state.cladding_temp_c < self.limits.clad_temp_limit
                 and state.fuel_damage_fraction < 0.1
                 and state.containment_hydrogen_pct < 4.0
                 and (

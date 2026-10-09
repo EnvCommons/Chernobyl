@@ -56,12 +56,18 @@ class Equipment:
         self.visible_indicator: str | None = config.get("visible_indicator", None)
         self.temp_c: float = config.get("temp_c", 0.0)
         self.level_pct: float = config.get("level_pct", 0.0)
+        # A failed component that cannot be brought back during the scenario.
+        self.restartable: bool = config.get("restartable", True)
+        # A reactor coolant pump whose seals have run without cooling: its
+        # seal package fails as soon as the pump is started.
+        self.seal_cooling_lost: bool = config.get("seal_cooling_lost", False)
+        self.seal_failed: bool = False
 
     def can_operate(self) -> bool:
         return self.status not in INOPERABLE_STATES
 
     def can_restart(self) -> bool:
-        return self.status not in PERMANENT_FAILURE_STATES
+        return self.status not in PERMANENT_FAILURE_STATES and self.restartable
 
     def get_apparent_status(self) -> str:
         """What the instrument panel shows (may differ from reality)."""
@@ -70,6 +76,15 @@ class Equipment:
         return self.status.value
 
     def start(self) -> tuple[bool, str]:
+        if self.seal_failed:
+            return False, f"{self.id} has failed seals and cannot be run"
+        if self.seal_cooling_lost:
+            self.seal_failed = True
+            self.status = EquipmentStatus.FAILED
+            return False, (
+                f"{self.id} tripped on start: its seals, which had lost cooling, failed "
+                "and reactor coolant is now leaking through them"
+            )
         if not self.can_restart():
             return False, f"{self.id} is {self.status.value} and cannot be restarted"
         if self.status == EquipmentStatus.RUNNING:
@@ -86,6 +101,10 @@ class Equipment:
         return True, f"{self.id} stopped"
 
     def set_speed(self, speed_pct: float) -> tuple[bool, str]:
+        if speed_pct > 0 and self.status != EquipmentStatus.RUNNING and (
+            self.seal_cooling_lost or self.seal_failed or not self.restartable
+        ):
+            return self.start()
         if not self.can_operate():
             return False, f"{self.id} is {self.status.value} and cannot be adjusted"
         self.speed_pct = max(0.0, min(100.0, speed_pct))
@@ -246,6 +265,7 @@ class EquipmentManager:
         self.equipment: dict[str, Equipment] = {}
         self.instrument_failures: list[InstrumentFailure] = []
         self.containment_venting = False
+        self.vent_scrubbed = False
 
         for eq_id, config in equipment_config.items():
             if "batteries" in eq_id or "battery" in eq_id:
@@ -359,6 +379,18 @@ class EquipmentManager:
             p_ratio = max(0.0, system_pressure_mpa / 15.5)
             return 20.0 * math.sqrt(p_ratio)
         return 0.0
+
+    def get_seal_leak_rate(self, system_pressure_mpa: float) -> float:
+        """Leak through failed reactor coolant pump seals (kg/s).
+
+        A failed seal package passes up to ~480 gpm (~22 kg/s of hot coolant)
+        at full system pressure (WCAP-15603 seal leakage model, NRC RIS 2000-02).
+        """
+        failed = sum(1 for eq in self.equipment.values() if eq.seal_failed)
+        if failed == 0:
+            return 0.0
+        p_ratio = max(0.0, system_pressure_mpa / 15.5)
+        return failed * 22.0 * math.sqrt(p_ratio)
 
     def get_srv_flow(self, system_pressure_mpa: float) -> float:
         """Calculate steam flow through open SRVs (kg/s, for BWR depressurization)."""
