@@ -880,12 +880,16 @@ class ContainmentModel:
         venting: bool,
         vent_to_wetwell: bool = False,
         suppression_pool_temp: float = 30.0,
+        fuel_temp_c: float | None = None,
     ) -> ContainmentResult:
         """Advance containment state by dt seconds."""
 
         if self.p.containment_volume_m3 <= 0:
-            # No containment (Windscale): direct release
-            release_rate = 0.1 * fuel_damage  # TBq/s simplified
+            # No containment (Windscale): damaged fuel releases fission
+            # products directly while it burns. Uranium metal ignites in air
+            # at ~300°C, so a fire put out below that stops the release.
+            burning = fuel_temp_c is None or fuel_temp_c > 300.0
+            release_rate = 0.1 * fuel_damage if burning else 0.0  # TBq/s simplified
             return ContainmentResult(
                 pressure=0.101,
                 temperature=temperature,
@@ -1028,9 +1032,12 @@ class WignerEnergyModel:
         # Net heat
         net_heat = heat_in - heat_out_air - heat_out_water
 
-        # Temperature change
+        # Temperature change. Cooling cannot take the graphite below the
+        # temperature of the air or water that cools it.
         dt_temp = (net_heat / total_thermal_mass) * dt
         new_temp = graphite_temp_c + dt_temp
+        if dt_temp < 0:
+            new_temp = max(new_temp, min(graphite_temp_c, air_inlet_temp_c))
 
         # Fire check: uranium ignites in air at ~300°C, graphite above ~700°C
         # This is modeled as accelerating damage in the fuel integrity model

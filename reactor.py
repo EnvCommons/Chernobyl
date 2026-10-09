@@ -166,6 +166,9 @@ class ReactorSimulation:
 
         # Equipment
         self.equipment = EquipmentManager(reactor_type, eq_config, instr_failures)
+        # Pumps that deliver emergency injection. When set, injection is
+        # limited to the rated flow of those that are running.
+        self.injection_pumps: list[str] = list(initial_conditions.get("injection_pumps", []))
 
         # Physics models
         self.neutronics = NeutronicsModel(self.params)
@@ -317,10 +320,42 @@ class ReactorSimulation:
 
         return new_power, n, c
 
+    def injection_capacity_kg_s(self) -> float | None:
+        """Most injection the running injection pumps can deliver, or None if unlimited."""
+        if not self.injection_pumps:
+            return None
+        from equipment import PUMP_RATED_FLOWS
+        capacity = 0.0
+        for eq_id in self.injection_pumps:
+            eq = self.equipment.get(eq_id)
+            if eq is None:
+                continue
+            rated = PUMP_RATED_FLOWS.get(eq_id, 30.0)
+            if eq.status == EquipmentStatus.RUNNING:
+                capacity += rated * (eq.speed_pct / 100.0)
+            elif eq.status == EquipmentStatus.THROTTLED:
+                capacity += rated * (eq.flow_pct / 100.0)
+        return capacity
+
+    def effective_injection_kg_s(self) -> float:
+        capacity = self.injection_capacity_kg_s()
+        rate = self.state.injection_rate_kg_s
+        return rate if capacity is None else max(0.0, min(rate, capacity))
+
+    def rcs_leak_rate(self, pressure_mpa: float) -> float:
+        """Coolant lost through the stuck PORV and any failed pump seals (kg/s)."""
+        return (
+            self.equipment.get_porv_leak_rate(pressure_mpa)
+            + self.equipment.get_seal_leak_rate(pressure_mpa)
+        )
+
     def advance(self, dt_override: float | None = None) -> None:
         """Advance simulation by one timestep. All physics are coupled."""
         dt = dt_override if dt_override is not None else self.dt
         s = self.state
+        # Fuel temperature at the start of the step, including the heating
+        # from a pile fire (applied at the end of the previous step).
+        fuel_temp_start = s.fuel_temp_c
 
         # 0. Update equipment (battery drain, etc.)
         self.equipment.update(dt, s)
@@ -386,20 +421,22 @@ class ReactorSimulation:
             )
             s.reactivity_rods = base_rho + s.manual_rod_reactivity_offset
 
+        injection = self.effective_injection_kg_s()
+
         # 2. Calculate effective coolant flow
         effective_flow = self.equipment.get_effective_coolant_flow()
         # Add fire truck flow
         effective_flow += self.equipment.get_fire_truck_flow()
         # Add injection
-        effective_flow += s.injection_rate_kg_s
+        effective_flow += injection
 
         # 2a. Track coolant inventory loss from leaks (PORV, SRV, etc.)
         # Ref: TMI-2 lost ~32,000 gallons (~120,000 kg) in first 2h22m through
         # stuck-open PORV at ~20 kg/s (NUREG-0600). Loss of inventory degrades
         # core cooling even with pumps running.
-        leak_rate_preview = self.equipment.get_porv_leak_rate(s.coolant_pressure_mpa)
+        leak_rate_preview = self.rcs_leak_rate(s.coolant_pressure_mpa)
         srv_flow_preview = self.equipment.get_srv_flow(s.coolant_pressure_mpa)
-        net_loss_kg_s = leak_rate_preview + srv_flow_preview - s.injection_rate_kg_s
+        net_loss_kg_s = leak_rate_preview + srv_flow_preview - injection
         if net_loss_kg_s > 0 and self.params.coolant_mass_kg > 0:
             mass_lost = net_loss_kg_s * dt
             s.coolant_inventory_fraction = max(
@@ -443,7 +480,7 @@ class ReactorSimulation:
         # multi-physics; standard approach in RELAP5, TRACE, and other NRC-
         # approved nuclear safety codes (NUREG/CR-5535).
 
-        leak_rate = self.equipment.get_porv_leak_rate(s.coolant_pressure_mpa)
+        leak_rate = self.rcs_leak_rate(s.coolant_pressure_mpa)
         srv_flow = self.equipment.get_srv_flow(s.coolant_pressure_mpa)
 
         decay_heat_mw = self.decay_heat_model.calculate(
@@ -454,7 +491,7 @@ class ReactorSimulation:
 
         # Boron injection negative reactivity
         boron_reactivity = 0.0
-        if s.injection_boron_ppm > 0 and s.injection_rate_kg_s > 0:
+        if s.injection_boron_ppm > 0 and injection > 0:
             boron_reactivity = -s.injection_boron_ppm * 1e-5
 
         # 4. Thermal-hydraulics update (single pass for the full timestep).
@@ -470,7 +507,7 @@ class ReactorSimulation:
             coolant_outlet_temp=s.coolant_outlet_temp_c,
             void_fraction=s.void_fraction,
             leak_rate_kg_s=leak_rate,
-            injection_rate_kg_s=s.injection_rate_kg_s,
+            injection_rate_kg_s=injection,
             injection_temp_c=30.0,
             srv_flow_kg_s=srv_flow,
             coolant_inventory_fraction=s.coolant_inventory_fraction,
@@ -570,7 +607,7 @@ class ReactorSimulation:
 
         # 11. Containment
         venting = self.equipment.containment_venting
-        vent_to_wetwell = False
+        vent_to_wetwell = self.equipment.vent_scrubbed
         vent_eq = self.equipment.get("containment_vent")
         if vent_eq and isinstance(vent_eq, Valve) and vent_eq.is_open():
             venting = True
@@ -584,6 +621,7 @@ class ReactorSimulation:
             dt, s.containment_pressure_mpa, s.containment_temp_c,
             s.containment_hydrogen_pct, fuel_result.hydrogen_rate_kg_s,
             s.fuel_damage_fraction, venting, vent_to_wetwell, suppression_temp,
+            fuel_temp_c=fuel_temp_start,
         )
         s.containment_pressure_mpa = containment_result.pressure
         s.containment_temp_c = containment_result.temperature
@@ -722,6 +760,10 @@ class ReactorSimulation:
                     readings["equipment"][eq_id] = {"status": "CLOSED"}
                     continue
             info: dict[str, Any] = {"status": apparent}
+            if eq.seal_failed:
+                info["seals"] = "FAILED, leaking"
+            elif eq.seal_cooling_lost:
+                info["seals"] = "seal cooling lost"
             if hasattr(eq, "charge_pct") and isinstance(eq, type(eq)):
                 # Battery
                 from equipment import Battery
@@ -782,6 +824,8 @@ class ReactorSimulation:
                 extra = f" (charge: {info['charge_pct']}%, ~{info['hours_remaining']}h remaining)"
             if "temp_c" in info:
                 extra = f" (temp: {info['temp_c']}°C, level: {info['level_pct']}%)"
+            if "seals" in info:
+                extra = f" (seals: {info['seals']})"
             lines.append(f"  {eq_id}: {status}{extra}")
 
         lines.append("\n" + "=" * 60)

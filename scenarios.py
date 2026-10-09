@@ -270,6 +270,10 @@ CHERNOBYL_NORMAL_OPS = Scenario(
 # THREE MILE ISLAND SCENARIOS (PWR)
 # =============================================================================
 
+_STUCK_OPEN = {"status": "stuck_open"}
+_FAILED = {"status": "failed", "restartable": False}
+_SEAL_COOLING_LOST = {"status": "tripped", "seal_cooling_lost": True}
+
 TMI_PORV_STUCK = Scenario(
     id="tmi_porv_stuck",
     scenario="tmi_porv_stuck",
@@ -290,7 +294,10 @@ TMI_PORV_STUCK = Scenario(
         "tailpipe temperature, falling pressure despite 'closed' PORV — and stop "
         "the loss of coolant before the core uncovers. You take over the control "
         "room at the time shown on the plant clock: the leak may already have "
-        "been running for a while, and not every component may respond as designed."
+        "been running for a while, and not every component may respond as designed. "
+        "Emergency injection is delivered by the HPI pumps, so it is limited by "
+        "how many of them are running. A reactor coolant pump whose seals have "
+        "lost cooling must not be started: its seals fail and leak coolant."
     ),
     initial_conditions={
         "thermal_power_mw": 0.0,
@@ -346,22 +353,38 @@ TMI_PORV_STUCK = Scenario(
         "instrument_failures": [
             {"instrument": "porv_position", "failure": "reads_closed_when_open"},
         ],
+        "injection_pumps": ["hpi_1", "hpi_2"],
     },
-    # Takeover time and block valve condition by seed. A late takeover needs
-    # the lost inventory made up, not just the leak isolated; a block valve
-    # stuck open cannot isolate the leak at all, so only makeup injection
-    # saves the core.
+    # Takeover time and equipment condition by seed, so the right response
+    # differs between seeds:
+    # - a late takeover needs the lost inventory made up, not just the leak
+    #   isolated;
+    # - a block valve stuck open leaves makeup injection as the only way to
+    #   save the core;
+    # - with both HPI pumps out there is no injection and no core flow, so a
+    #   reactor coolant pump must be started;
+    # - a pump whose seals lost cooling leaks once started, so only pumps
+    #   with intact seal cooling should be run.
     variants=[
         {"unattended_minutes": 90},
-        {"unattended_minutes": 0, "equipment": {"block_valve": {"status": "stuck_open"}}},
-        {"unattended_minutes": 100},
-        {"unattended_minutes": 60, "equipment": {"block_valve": {"status": "stuck_open"}}},
-        {"unattended_minutes": 110},
-        {"unattended_minutes": 30, "equipment": {"block_valve": {"status": "stuck_open"}}},
-        {"unattended_minutes": 105},
-        {"unattended_minutes": 90, "equipment": {"block_valve": {"status": "stuck_open"}}},
-        {"unattended_minutes": 95},
-        {"unattended_minutes": 110, "equipment": {"block_valve": {"status": "stuck_open"}}},
+        {"unattended_minutes": 0, "equipment": {"block_valve": _STUCK_OPEN}},
+        {"unattended_minutes": 0, "equipment": {"hpi_1": _FAILED, "hpi_2": _FAILED}},
+        {"unattended_minutes": 60, "equipment": {"block_valve": _STUCK_OPEN, "hpi_2": _FAILED}},
+        {"unattended_minutes": 100, "equipment": {
+            "hpi_2": _FAILED, "rcp_1": _SEAL_COOLING_LOST, "rcp_2": _SEAL_COOLING_LOST}},
+        {"unattended_minutes": 30, "equipment": {
+            "block_valve": _STUCK_OPEN, "rcp_1": _SEAL_COOLING_LOST, "rcp_2": _SEAL_COOLING_LOST,
+            "rcp_3": _SEAL_COOLING_LOST, "rcp_4": _SEAL_COOLING_LOST}},
+        {"unattended_minutes": 0, "equipment": {
+            "hpi_1": _FAILED, "hpi_2": _FAILED, "rcp_1": _SEAL_COOLING_LOST,
+            "rcp_2": _SEAL_COOLING_LOST, "rcp_3": _SEAL_COOLING_LOST}},
+        {"unattended_minutes": 90, "equipment": {
+            "block_valve": _STUCK_OPEN, "hpi_1": _FAILED, "rcp_3": _SEAL_COOLING_LOST,
+            "rcp_4": _SEAL_COOLING_LOST}},
+        {"unattended_minutes": 0, "equipment": {
+            "hpi_1": _FAILED, "hpi_2": _FAILED, "rcp_2": _SEAL_COOLING_LOST,
+            "rcp_4": _SEAL_COOLING_LOST}},
+        {"unattended_minutes": 110, "equipment": {"block_valve": _STUCK_OPEN}},
     ],
 )
 

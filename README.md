@@ -28,11 +28,15 @@ MIT
 
 There are 50 training tasks across 5 crisis scenarios (each with 10 random seeds). In each of them the plant fails or keeps degrading if left alone, so operator action makes a measurable difference:
 
-- **tmi_porv_stuck** (PWR, hard) -- Post-scram. PORV stuck open but indicator shows closed. Unattended, the core uncovers and hydrogen detonates about two hours into the transient. The seed sets when the operator takes over (minute 0 to 110) and whether the block valve can be closed: a late takeover also needs the lost inventory made up, and a block valve stuck open leaves makeup injection as the only way to save the core.
+- **tmi_porv_stuck** (PWR, hard) -- Post-scram. PORV stuck open but indicator shows closed. Unattended, the core uncovers and hydrogen detonates about two hours into the transient. The seed sets when the operator takes over (minute 0 to 110) and the condition of the plant's equipment, so the right response differs between seeds:
+  - A late takeover also needs the lost inventory made up.
+  - A block valve stuck open leaves makeup injection as the only way to save the core.
+  - Injection is delivered by the HPI pumps and is limited to the rated flow of those running. With both HPI pumps out there is no injection and no core flow, so a reactor coolant pump must be started.
+  - A reactor coolant pump whose seals lost cooling fails when started and leaks coolant through its seals, so only pumps with intact seal cooling should be run.
 - **tmi_recovery** (PWR, expert) -- Core 40% uncovered, cladding at 1100 C, hydrogen generating. Restore cooling before the cladding oxidizes.
 - **fukushima_rcic_failure** (BWR, expert) -- RCIC failed, batteries at 10%, must depressurize and establish low-pressure injection.
-- **fukushima_hydrogen** (BWR, expert) -- Core damage underway, H2 at 8% in containment, must vent while minimizing radiation release.
-- **windscale_fire** (Windscale, expert) -- Fire detected in pile, must choose between air (fans flames) or water (hydrogen/steam explosion risk).
+- **fukushima_hydrogen** (BWR, expert) -- Core damage underway, H2 at 8% in containment, must vent while minimizing radiation release. Venting through the wetwell or filtered path scrubs most fission products; the unfiltered path releases them directly.
+- **windscale_fire** (Windscale, expert) -- Fire detected in pile, must choose between air (fans flames) or water (hydrogen/steam explosion risk). Damaged fuel releases fission products while it burns, so the sooner the fire is out, the smaller the release.
 
 Apart from tmi_porv_stuck, the seed only changes instrument noise; the plant physics of a scenario is deterministic.
 
@@ -63,7 +67,7 @@ When the episode ends, its value is the safety index averaged over the scenario'
 
 The reward is this value minus the value of the same scenario with the plant left unattended (computed deterministically at setup). An agent that only waits scores exactly 0; positive scores mean the operator did better than doing nothing. All intermediate steps have reward 0.
 
-Stabilization (the success terminal of the stabilize scenarios) requires 30 consecutive simulated minutes of stable plant state (cladding below limit, fuel damage below 10%, hydrogen below 4%, containment below design pressure), counted only after the step at which the unattended plant fails. A plant that starts out stable therefore cannot end the episode before its crisis would have developed. Scenarios whose unattended plant never fails run to their full horizon.
+Stabilization (the success terminal of the stabilize scenarios) requires 30 consecutive simulated minutes of stable plant state (cladding below limit, fuel damage below 10%, hydrogen below 4%, containment below design pressure, and for a PWR a coolant inventory that is not falling), counted only after the step at which the unattended plant fails. A plant that starts out stable therefore cannot end the episode before its crisis would have developed. Scenarios whose unattended plant never fails run to their full horizon.
 
 We do not use LLM graders for this task.
 
@@ -84,7 +88,7 @@ Agents have 10 environment-specific tools:
 | `activate_system` | Yes | Activate/deactivate safety systems (ECCS, RCIC, diesels, fire trucks). |
 | `inject_coolant` | Yes | Emergency injection from borated water, seawater, fire truck, or makeup tank. Fire truck requires low pressure. |
 | `order_scram` | Yes | Emergency shutdown (AZ-5/SCRAM). Dangerous in RBMK with low ORM. |
-| `vent_containment` | Yes | Vent via filtered, unfiltered, or wetwell path. Reduces H2 risk but releases some radioactivity. |
+| `vent_containment` | Yes | Vent via filtered, unfiltered, or wetwell path. Reduces H2 risk but releases some radioactivity. The vent stays open until `containment_vent` is closed. |
 | `submit_log` | No | Document reasoning. No simulation effect. |
 | `wait` | Yes | Advance time without taking action, `duration_steps` steps at once (default 1). Use when monitoring stable conditions. |
 

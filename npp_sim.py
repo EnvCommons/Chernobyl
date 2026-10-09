@@ -676,6 +676,16 @@ Begin by observing the instruments to assess the current situation."""
             ft.status = EquipmentStatus.RUNNING
             ft.flow_kg_s = params.flow_rate_kg_s
 
+        capacity = self.sim.injection_capacity_kg_s()
+        if capacity is not None and capacity <= 0 and params.flow_rate_kg_s > 0:
+            pumps = ", ".join(self.sim.injection_pumps)
+            return ToolOutput(
+                metadata={"error": "No injection pump running"},
+                blocks=[TextBlock(text=f"Error: emergency injection is delivered by the injection pumps ({pumps}), and none of them is running.")],
+                reward=0.0,
+                finished=False,
+            )
+
         # Set injection state
         self.sim.state.injection_rate_kg_s = params.flow_rate_kg_s
         self.sim.state.injection_boron_ppm = params.boron_ppm
@@ -684,6 +694,10 @@ Begin by observing the instruments to assess the current situation."""
             f"Injecting {params.source} at {params.flow_rate_kg_s:.1f} kg/s"
             + (f" with {params.boron_ppm:.0f} ppm boron" if params.boron_ppm > 0 else "")
         )
+        if capacity is not None and params.flow_rate_kg_s > capacity:
+            detail += (
+                f" requested; the running injection pumps deliver at most {capacity:.1f} kg/s"
+            )
 
         return self._advance_time_and_get_output("inject_coolant", detail)
 
@@ -748,13 +762,17 @@ Begin by observing the instruments to assess the current situation."""
                 vent.open()
             else:
                 vent.start()
+                self.sim.equipment.containment_venting = True
 
-        self.sim.equipment.containment_venting = True
+        # The filtered and wetwell paths scrub fission products; the
+        # unfiltered path releases them directly.
+        self.sim.equipment.vent_scrubbed = params.vent_path in ("filtered", "wetwell")
 
         detail = (
             f"Containment venting initiated via {params.vent_path} path. "
             f"Current containment pressure: {self.sim.state.containment_pressure_mpa:.3f} MPa, "
-            f"H₂: {self.sim.state.containment_hydrogen_pct:.1f}%."
+            f"H₂: {self.sim.state.containment_hydrogen_pct:.1f}%. "
+            "The vent stays open until containment_vent is closed."
         )
 
         return self._advance_time_and_get_output("vent_containment", detail)
