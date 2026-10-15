@@ -502,6 +502,57 @@ async def test_windscale_has_no_pwr_coolant_sources():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool,params", [
+    ("activate_system", {"system_id": "water_injection", "action": "activate"}),
+    ("operate_pump", {"pump_id": "water_injection", "action": "start"}),
+    ("operate_valve", {"valve_id": "water_injection", "action": "open"}),
+])
+async def test_windscale_starting_the_hoses_gives_full_flow_from_a_reduced_flow(tool, params):
+    # The scenario text says activating the hoses gives their full 50 kg/s.
+    env = N.NuclearPlantEnvironment(task_spec=_task("windscale_fire"))
+    await env.setup()
+    await env.inject_coolant(N.InjectCoolantParams(source="water", flow_rate_kg_s=10.0))
+    assert env.sim.pile_water_flow_kg_s() == 10.0
+    out = await getattr(env, tool)(PARAMS[tool](**params))
+    assert "brought to full speed" in out.blocks[0].text
+    assert env.sim.pile_water_flow_kg_s() == 50.0
+    out = await getattr(env, tool)(PARAMS[tool](**params))
+    assert "already running" in out.blocks[0].text
+    assert env.sim.pile_water_flow_kg_s() == 50.0
+
+
+@pytest.mark.asyncio
+async def test_windscale_starting_a_half_speed_blower_runs_it_at_full_speed():
+    env = N.NuclearPlantEnvironment(task_spec=_task("windscale_fire"))
+    await env.setup()
+    blower = env.sim.equipment.get("blower_1")
+    assert blower.speed_pct == 50
+    await env.operate_pump(N.OperatePumpParams(pump_id="blower_1", action="start"))
+    assert blower.speed_pct == 100.0
+
+
+@pytest.mark.asyncio
+async def test_open_valve_start_is_unchanged():
+    # Valves have no speed: starting an open valve still reports it running.
+    env = N.NuclearPlantEnvironment(task_spec=_task("fukushima_hydrogen"))
+    await env.setup()
+    await env.vent_containment(N.VentContainmentParams(vent_path="wetwell"))
+    out = await env.activate_system(N.ActivateSystemParams(system_id="containment_vent", action="activate"))
+    assert "containment_vent is already running" in out.blocks[0].text
+
+
+@pytest.mark.asyncio
+async def test_windscale_vent_containment_is_rejected_without_advancing_time():
+    env = N.NuclearPlantEnvironment(task_spec=_task("windscale_fire"))
+    await env.setup()
+    out = await env.vent_containment(N.VentContainmentParams(vent_path="filtered"))
+    assert out.metadata.get("error") and not out.finished
+    assert "no containment" in out.blocks[0].text
+    assert env.step_count == 0
+    assert env.sim.equipment.get("containment_vent") is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("seed,pump", [(6, "rcp_4"), (8, "rcp_1")])
 async def test_porv_no_flow_seeds_need_core_flow_restored_first(seed, pump):
     # Both HPI pumps out and the core four minutes without flow at takeover.

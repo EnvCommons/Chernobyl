@@ -785,6 +785,18 @@ Begin by observing the instruments to assess the current situation."""
         """
         assert self.sim is not None
 
+        if self.sim.pile_fire:
+            return ToolOutput(
+                metadata={"error": "No containment"},
+                blocks=[TextBlock(text=(
+                    "Error: this plant has no containment to vent. The pile is open to "
+                    "the chimney, and the hydrogen reading is the concentration in the "
+                    "off-gas flowing up it."
+                ))],
+                reward=0.0,
+                finished=False,
+            )
+
         valid_paths = {"filtered", "unfiltered", "wetwell"}
         if params.vent_path not in valid_paths:
             return ToolOutput(
