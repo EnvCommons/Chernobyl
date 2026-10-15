@@ -87,11 +87,13 @@ class Equipment:
             )
         if not self.can_restart():
             return False, f"{self.id} is {self.status.value} and cannot be restarted"
-        if self.status == EquipmentStatus.RUNNING:
+        if self.status == EquipmentStatus.RUNNING and self.speed_pct >= 100.0:
             return True, f"{self.id} is already running"
+        # Starting equipment that runs at reduced speed brings it to full speed.
+        was_running = self.status == EquipmentStatus.RUNNING
         self.status = EquipmentStatus.RUNNING
         self.speed_pct = 100.0
-        return True, f"{self.id} started"
+        return True, f"{self.id} brought to full speed" if was_running else f"{self.id} started"
 
     def stop(self) -> tuple[bool, str]:
         if self.status in PERMANENT_FAILURE_STATES:
@@ -159,6 +161,9 @@ class Valve(Equipment):
     def start(self) -> tuple[bool, str]:
         if self.status in (EquipmentStatus.STUCK_OPEN, EquipmentStatus.STUCK_CLOSED):
             return self.open()
+        # A valve has no speed: an open valve is running whatever its speed_pct.
+        if self.status == EquipmentStatus.RUNNING:
+            return True, f"{self.id} is already running"
         return super().start()
 
     def stop(self) -> tuple[bool, str]:

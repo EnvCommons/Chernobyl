@@ -11,7 +11,7 @@ import copy
 from dataclasses import dataclass
 from typing import Any
 
-from physics import REACTOR_PARAMS, ReactorParams
+from physics import REACTOR_PARAMS, PileFireModel, ReactorParams
 from reactor import ReactorSimulation, ReactorState
 
 
@@ -55,6 +55,10 @@ SAFETY_LIMITS: dict[str, SafetyLimits] = {
         normal_pressure=0.101,
     ),
 }
+
+
+# Release below which putting out a pile fire counts as full success.
+EXTINGUISH_RELEASE_LIMIT_TBQ = 10.0
 
 
 class RewardCalculator:
@@ -173,6 +177,15 @@ class RewardCalculator:
                 return 0.2  # Marginal
             else:
                 return -0.3  # Severe damage
+
+        elif self.target_outcome == "extinguish":
+            # A pile fire: graded on putting the fire out (fuel below
+            # uranium's ignition temperature) and on how much it released.
+            if state.fuel_temp_c >= PileFireModel.IGNITION_C:
+                return 0.0  # Still burning
+            if state.environmental_release_tbq < EXTINGUISH_RELEASE_LIMIT_TBQ:
+                return 1.0  # Fire out, release contained
+            return 0.5  # Fire out
 
         elif self.target_outcome == "maintain_power":
             power_fraction = state.thermal_power_mw / self.limits.rated_power
