@@ -362,7 +362,8 @@ TMI_PORV_STUCK = Scenario(
     # - a block valve stuck open leaves makeup injection as the only way to
     #   save the core;
     # - with both HPI pumps out there is no injection and no core flow, so a
-    #   reactor coolant pump must be started;
+    #   reactor coolant pump must be started; when the core has already gone
+    #   minutes without flow, restoring flow comes before isolating the leak;
     # - a pump whose seals lost cooling leaks once started, so only pumps
     #   with intact seal cooling should be run.
     variants=[
@@ -375,13 +376,13 @@ TMI_PORV_STUCK = Scenario(
         {"unattended_minutes": 30, "equipment": {
             "block_valve": _STUCK_OPEN, "rcp_1": _SEAL_COOLING_LOST, "rcp_2": _SEAL_COOLING_LOST,
             "rcp_3": _SEAL_COOLING_LOST, "rcp_4": _SEAL_COOLING_LOST}},
-        {"unattended_minutes": 0, "equipment": {
+        {"unattended_minutes": 4, "equipment": {
             "hpi_1": _FAILED, "hpi_2": _FAILED, "rcp_1": _SEAL_COOLING_LOST,
             "rcp_2": _SEAL_COOLING_LOST, "rcp_3": _SEAL_COOLING_LOST}},
         {"unattended_minutes": 90, "equipment": {
             "block_valve": _STUCK_OPEN, "hpi_1": _FAILED, "rcp_3": _SEAL_COOLING_LOST,
             "rcp_4": _SEAL_COOLING_LOST}},
-        {"unattended_minutes": 0, "equipment": {
+        {"unattended_minutes": 4, "equipment": {
             "hpi_1": _FAILED, "hpi_2": _FAILED, "rcp_2": _SEAL_COOLING_LOST,
             "rcp_4": _SEAL_COOLING_LOST}},
         {"unattended_minutes": 110, "equipment": {"block_valve": _STUCK_OPEN}},
@@ -843,19 +844,26 @@ WINDSCALE_FIRE = Scenario(
     difficulty="expert",
     time_step_minutes=2.0,
     max_steps=250,
-    target_outcome="stabilize",
+    target_outcome="extinguish",
     description=(
         "October 10, 1957, 16:30 — Fire has been visually confirmed in Pile 1 through "
         "inspection holes. Fuel cartridges are cherry-red and burning. Approximately "
         "150 fuel channels are involved. The fire is being fed by the air flowing "
         "through the pile for cooling. The burst cartridge detector (BCD) is in alarm. "
-        "Stack monitors show radioactivity is being released. You face an agonizing "
-        "dilemma: (1) Increase blower speed to cool the graphite — but this supplies "
-        "more oxygen to the fire. (2) Stop the blowers — removes oxygen but also "
-        "removes all cooling. (3) Inject water — highly effective at cooling but risks "
-        "hydrogen explosion from water-on-hot-graphite reaction and steam explosion. "
-        "Historically, water was used and it worked, but the decision was described as "
-        "'the bravest act in the history of nuclear power.'"
+        "Stack monitors show radioactivity is being released, and the release grows "
+        "with the rate at which the fuel burns. You face an agonizing dilemma: "
+        "(1) Increase blower speed to cool the graphite — but this supplies more oxygen "
+        "to the fire. (2) Stop the blowers — removes most of the oxygen, but the chimney "
+        "still draws some air through the pile and nothing then cools it. (3) Inject "
+        "water through hoses into the fuel channels (water_injection: activate it for "
+        "its full 50 kg/s, or set a lower flow with inject_coolant source='water' or "
+        "operate_pump set_speed) — water cools by boiling, but on fuel and graphite "
+        "hotter than about 800°C part of it reacts to hydrogen, more the hotter the core "
+        "and the faster the water. The hydrogen reading shows hydrogen in the pile "
+        "off-gas, diluted by the air flowing through; if it builds up the pile can "
+        "explode. The plant has no PWR-style makeup systems. Historically, water was "
+        "used and it worked, but the decision was described as 'the bravest act in "
+        "the history of nuclear power.'"
     ),
     initial_conditions={
         "thermal_power_mw": 0.0,
@@ -903,6 +911,7 @@ WINDSCALE_FIRE = Scenario(
         "instrument_failures": [
             {"instrument": "graphite_thermocouple_zone_3", "failure": "destroyed"},
         ],
+        "pile_fire": True,
     },
 )
 

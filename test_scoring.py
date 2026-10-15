@@ -56,8 +56,8 @@ PROCEDURES = {
         ("vent_containment", {"vent_path": "wetwell"}),
     ],
     "windscale_fire": [
-        ("activate_system", {"system_id": "water_injection", "action": "activate"}),
         ("operate_pump", {"pump_id": "blower_1", "action": "stop"}),
+        ("inject_coolant", {"source": "water", "flow_rate_kg_s": 20.0}),
     ],
 }
 
@@ -277,7 +277,7 @@ async def test_porv_no_single_sequence_wins_every_seed():
     # isolate, start every RCP, inject.
     modal = [CLOSE_BLOCK] + START_RCPS + [INJECT]
     no_rcp = [CLOSE_BLOCK, INJECT]
-    rcp_4 = [CLOSE_BLOCK, ("operate_pump", {"pump_id": "rcp_4", "action": "start"})]
+    rcp_4 = [("operate_pump", {"pump_id": "rcp_4", "action": "start"}), CLOSE_BLOCK]
     rcp_1 = [CLOSE_BLOCK, ("operate_pump", {"pump_id": "rcp_1", "action": "start"})]
     # Seed 6: no HPI, only rcp_4 has intact seals.
     modal_6, _, _ = await _play("tmi_porv_stuck", modal, seed=6)
@@ -417,17 +417,104 @@ async def test_closing_the_vent_stops_venting():
 
 @pytest.mark.asyncio
 async def test_windscale_release_stops_once_the_fire_is_out():
-    water_off = [
-        ("activate_system", {"system_id": "water_injection", "action": "activate"}),
-        ("operate_pump", {"pump_id": "blower_1", "action": "stop"}),
-    ]
     passive, _, _ = await _play("windscale_fire", [])
-    prompt, _, env = await _play("windscale_fire", water_off)
-    delayed, _, _ = await _play("windscale_fire", [("wait", {"duration_steps": 20})] + water_off)
+    prompt, out, env = await _play("windscale_fire", PROCEDURES["windscale_fire"])
+    delayed, _, _ = await _play(
+        "windscale_fire", [("wait", {"duration_steps": 20})] + PROCEDURES["windscale_fire"]
+    )
     assert sum(prompt) > sum(delayed) + 0.05
     assert sum(delayed) > sum(passive) + 0.05
     assert env.sim.state.environmental_release_tbq < 5.0
-    assert env.sim.state.graphite_temp_c >= 20.0
+    assert 20.0 <= env.sim.state.fuel_temp_c < 300.0
+    assert out.metadata["outcome"] == 1.0
+
+
+STOP_BLOWER = ("operate_pump", {"pump_id": "blower_1", "action": "stop"})
+FULL_WATER = ("activate_system", {"system_id": "water_injection", "action": "activate"})
+
+
+def _release(env) -> float:
+    return env.sim.state.environmental_release_tbq
+
+
+@pytest.mark.asyncio
+async def test_windscale_air_feeds_the_fire():
+    passive, out_p, env_p = await _play("windscale_fire", [])
+    full_air, _, env_f = await _play("windscale_fire", [
+        ("operate_pump", {"pump_id": "blower_2", "action": "start"}),
+        ("operate_pump", {"pump_id": "blower_1", "action": "start"}),
+    ])
+    starved, out_s, env_s = await _play("windscale_fire", [STOP_BLOWER])
+    assert _release(env_f) > _release(env_p) > _release(env_s)
+    assert sum(starved) > sum(passive) > sum(full_air)
+    # Unattended, the fire burns all scenario long and releases over 50 TBq.
+    assert out_p.metadata["outcome"] == -0.8
+    # Starved of air it smoulders on: not out, so no outcome credit.
+    assert env_s.sim.state.fuel_temp_c > 300.0
+    assert out_s.metadata["outcome"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_windscale_water_puts_the_fire_out_only_with_the_air_cut():
+    air_on, out_a, env_a = await _play("windscale_fire", [FULL_WATER])
+    air_cut, out_c, env_c = await _play("windscale_fire", PROCEDURES["windscale_fire"])
+    assert env_a.sim.state.fuel_temp_c > 300.0
+    assert out_a.metadata["outcome"] < 0.0
+    assert env_c.sim.state.fuel_temp_c < 300.0
+    assert sum(air_cut) > sum(air_on) + 1.0
+
+
+@pytest.mark.asyncio
+async def test_windscale_fast_water_on_a_very_hot_core_explodes():
+    reckless, out, env = await _play("windscale_fire", [STOP_BLOWER, FULL_WATER])
+    assert out.metadata["reason"] == "hydrogen_detonation"
+    careful, out_c, _ = await _play("windscale_fire", PROCEDURES["windscale_fire"])
+    assert out_c.metadata["reason"] == "max_steps_reached"
+    assert sum(careful) > sum(reckless) + 2.0
+    # Water at full flow is safe once the core has cooled below the
+    # temperature at which water reacts.
+    ramp = PROCEDURES["windscale_fire"] + [
+        ("wait", {"duration_steps": 60}),
+        ("inject_coolant", {"source": "water", "flow_rate_kg_s": 50.0}),
+    ]
+    ramped, out_r, env_r = await _play("windscale_fire", ramp)
+    assert out_r.metadata["reason"] == "max_steps_reached"
+    assert env_r.sim.pile_water_flow_kg_s() == 50.0
+
+
+@pytest.mark.asyncio
+async def test_windscale_has_no_pwr_coolant_sources():
+    env = N.NuclearPlantEnvironment(task_spec=_task("windscale_fire"))
+    await env.setup()
+    for source in ("makeup_tank", "borated_water", "seawater", "fire_truck"):
+        out = await env.inject_coolant(N.InjectCoolantParams(source=source, flow_rate_kg_s=50.0))
+        assert out.metadata.get("error") and not out.finished
+        assert "source='water'" in out.blocks[0].text
+    assert env.step_count == 0
+    out = await env.inject_coolant(N.InjectCoolantParams(source="water", flow_rate_kg_s=80.0))
+    assert "at most 50 kg/s" in out.blocks[0].text
+    assert env.sim.pile_water_flow_kg_s() == 50.0
+    out = await env.inject_coolant(N.InjectCoolantParams(source="water", flow_rate_kg_s=10.0))
+    assert env.sim.pile_water_flow_kg_s() == 10.0
+    assert "water_injection: running (flow: 10 kg/s)" in out.blocks[0].text
+    await env.inject_coolant(N.InjectCoolantParams(source="water", flow_rate_kg_s=0.0))
+    assert env.sim.pile_water_flow_kg_s() == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seed,pump", [(6, "rcp_4"), (8, "rcp_1")])
+async def test_porv_no_flow_seeds_need_core_flow_restored_first(seed, pump):
+    # Both HPI pumps out and the core four minutes without flow at takeover.
+    assert _porv_faults(seed)[:3] == (4, False, 2)
+    start = ("operate_pump", {"pump_id": pump, "action": "start"})
+    eccs = ("activate_system", {"system_id": "eccs", "action": "activate"})
+    flow_first, out_f, _ = await _play("tmi_porv_stuck", [start, CLOSE_BLOCK], seed=seed)
+    isolate_first, out_i, _ = await _play("tmi_porv_stuck", [CLOSE_BLOCK, start], seed=seed)
+    slow, out_s, _ = await _play("tmi_porv_stuck", [CLOSE_BLOCK, eccs, start], seed=seed)
+    assert out_f.metadata["reason"] == "stabilized"
+    assert out_i.metadata["reason"] == "max_steps_reached"  # hydrogen never clears
+    assert out_s.metadata["reason"] == "hydrogen_detonation"
+    assert sum(flow_first) > sum(isolate_first) > sum(slow) + 2.0
 
 
 @pytest.mark.asyncio

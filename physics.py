@@ -1045,6 +1045,102 @@ class WignerEnergyModel:
         return new_temp, new_stored, total_release_mw
 
 
+@dataclass
+class PileFireResult:
+    """Results from one pile fire step."""
+    temp_c: float          # Temperature of the burning fuel channels (C)
+    hydrogen_pct: float    # Hydrogen in the pile off-gas (vol%)
+    release_tbq: float     # Fission products released this step (TBq)
+    damage: float          # Fuel fraction burned this step
+    release_rate_tbq_s: float
+
+
+class PileFireModel:
+    """Uranium fire in the fuel channels of an air-cooled graphite pile.
+
+    A lumped model of the burning zone. Air drawn through the pile both
+    feeds the fire and cools it. Above uranium's ignition temperature the
+    oxygen supply sets the burn rate, so more air burns more fuel and
+    releases more fission products, and the fire settles near the
+    temperature where air cooling balances combustion. With the blowers off
+    the chimney still draws some air through the pile, so the fire
+    smoulders rather than going out.
+
+    Water from hoses removes heat by boiling, enough to put the fire out
+    only once the air supply is cut. On fuel and graphite hotter than about
+    800 C part of the water reacts (U + 2H2O -> UO2 + 2H2 and
+    C + H2O -> CO + H2), so hydrogen in the off-gas grows with the water
+    flow and the temperature and is diluted by the air flow. A hydrogen
+    explosion follows if it accumulates.
+    """
+
+    IGNITION_C = 300.0            # Uranium metal ignites in air
+    FULL_BURN_C = 800.0           # Burning is oxygen-limited above this
+    NATURAL_DRAUGHT_KG_S = 15.0   # Air the chimney draws with the blowers off
+    AIR_INLET_C = 20.0
+    HEAT_PER_AIR = 0.016          # K/s per kg/s of air while fully burning
+    COOL_PER_AIR = 1.25e-5        # K/s per kg/s of air per K above the inlet
+    COOL_PER_WATER = 0.00625      # K/s per kg/s of water while boiling
+    LOSS_PER_S = 2.0e-5           # Conduction to the surrounding graphite and shield
+    H2_ONSET_C = 800.0
+    H2_FULL_C = 1200.0
+    H2_REACTING_FRACTION = 0.06   # Fraction of the water that reacts at H2_FULL_C
+    H2_TIME_CONSTANT_S = 120.0    # Flushing time of the pile and chimney gas
+    RELEASE_PER_AIR = 1.7e-5      # TBq/s per kg/s of air while fully burning
+    DAMAGE_PER_AIR = 7.0e-8       # Fuel fraction/s per kg/s of air while fully burning
+    SUBSTEP_S = 10.0
+
+    def burn_fraction(self, temp_c: float) -> float:
+        return min(1.0, max(0.0, (temp_c - self.IGNITION_C) / (self.FULL_BURN_C - self.IGNITION_C)))
+
+    def update(
+        self,
+        dt: float,
+        temp_c: float,
+        hydrogen_pct: float,
+        air_kg_s: float,
+        water_kg_s: float,
+    ) -> PileFireResult:
+        """Advance the fire by dt seconds."""
+        n = max(1, math.ceil(dt / self.SUBSTEP_S))
+        h = dt / n
+        release = 0.0
+        damage = 0.0
+        rate = 0.0
+        for _ in range(n):
+            burn = air_kg_s * self.burn_fraction(temp_c)
+            above_inlet = max(0.0, temp_c - self.AIR_INLET_C)
+            # Water boils off on hot fuel; below 100 C it only warms up.
+            water_cooling = self.COOL_PER_WATER * water_kg_s * min(1.0, above_inlet / 80.0)
+            dtemp = (
+                self.HEAT_PER_AIR * burn
+                - self.COOL_PER_AIR * air_kg_s * above_inlet
+                - self.LOSS_PER_S * above_inlet
+                - water_cooling
+            ) * h
+            # Cooling cannot take the fuel below the air and water temperature.
+            temp_c = max(min(temp_c, self.AIR_INLET_C), temp_c + dtemp)
+
+            reacting = self.H2_REACTING_FRACTION * min(
+                1.0, max(0.0, (temp_c - self.H2_ONSET_C) / (self.H2_FULL_C - self.H2_ONSET_C))
+            )
+            h2_mol_s = water_kg_s * reacting * (2.0 / 18.0) / 0.002
+            air_mol_s = air_kg_s / 0.029
+            h2_eq = 100.0 * h2_mol_s / max(h2_mol_s + air_mol_s, 1e-9)
+            hydrogen_pct += (h2_eq - hydrogen_pct) * (1.0 - math.exp(-h / self.H2_TIME_CONSTANT_S))
+
+            rate = self.RELEASE_PER_AIR * burn
+            release += rate * h
+            damage += self.DAMAGE_PER_AIR * burn * h
+        return PileFireResult(
+            temp_c=temp_c,
+            hydrogen_pct=hydrogen_pct,
+            release_tbq=release,
+            damage=damage,
+            release_rate_tbq_s=rate,
+        )
+
+
 # ===========================================================================
 # Pressurizer Model (PWR-specific)
 # ===========================================================================

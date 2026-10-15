@@ -17,6 +17,7 @@ from physics import (
     DecayHeatModel,
     FuelIntegrityModel,
     NeutronicsModel,
+    PileFireModel,
     PressurizerModel,
     ReactorParams,
     ThermalHydraulicsModel,
@@ -169,6 +170,9 @@ class ReactorSimulation:
         # Pumps that deliver emergency injection. When set, injection is
         # limited to the rated flow of those that are running.
         self.injection_pumps: list[str] = list(initial_conditions.get("injection_pumps", []))
+        # A pile fire in progress (Windscale): the fire model replaces the
+        # thermal, fuel and release models.
+        self.pile_fire = bool(initial_conditions.get("pile_fire", False))
 
         # Physics models
         self.neutronics = NeutronicsModel(self.params)
@@ -179,6 +183,7 @@ class ReactorSimulation:
         self.containment_model = ContainmentModel(self.params)
         self.wigner = WignerEnergyModel()
         self.pressurizer = PressurizerModel()
+        self.pile_fire_model = PileFireModel()
 
         # A scenario can start partway into its transient: the plant first
         # runs unattended up to the operator's takeover time.
@@ -359,6 +364,11 @@ class ReactorSimulation:
 
         # 0. Update equipment (battery drain, etc.)
         self.equipment.update(dt, s)
+
+        if self.pile_fire:
+            self._advance_pile_fire(dt)
+            s.time_seconds += dt
+            return
 
         # 1. Control rod movement (if inserting/scramming)
         # Sub-step rod movement to capture transient reactivity effects.
@@ -660,6 +670,43 @@ class ReactorSimulation:
         # 13. Update time
         s.time_seconds += dt
 
+    def pile_air_flow_kg_s(self) -> float:
+        """Air drawn through the pile by the blowers and the chimney (kg/s)."""
+        from equipment import PUMP_RATED_FLOWS
+        air = PileFireModel.NATURAL_DRAUGHT_KG_S
+        for eq_id in ("blower_1", "blower_2"):
+            eq = self.equipment.get(eq_id)
+            if eq and eq.status == EquipmentStatus.RUNNING:
+                air += PUMP_RATED_FLOWS.get(eq_id, 200.0) * (eq.speed_pct / 100.0)
+        return air
+
+    def pile_water_flow_kg_s(self) -> float:
+        """Water delivered into the fuel channels by the hoses (kg/s)."""
+        eq = self.equipment.get("water_injection")
+        if eq is None or eq.status != EquipmentStatus.RUNNING:
+            return 0.0
+        return eq.flow_kg_s * (eq.speed_pct / 100.0)
+
+    def _advance_pile_fire(self, dt: float) -> None:
+        s = self.state
+        air = self.pile_air_flow_kg_s()
+        result = self.pile_fire_model.update(
+            dt, s.fuel_temp_c, s.containment_hydrogen_pct, air, self.pile_water_flow_kg_s()
+        )
+        s.fuel_temp_c = result.temp_c
+        s.fuel_centerline_temp_c = result.temp_c
+        s.cladding_temp_c = result.temp_c
+        s.graphite_temp_c = result.temp_c
+        # The stack gas mixes air from the burning channels with the rest.
+        s.coolant_outlet_temp_c = s.coolant_inlet_temp_c + 0.25 * (result.temp_c - s.coolant_inlet_temp_c)
+        s.coolant_flow_rate_kg_s = air
+        s.containment_hydrogen_pct = result.hydrogen_pct
+        s.environmental_release_tbq += result.release_tbq
+        s.fuel_damage_fraction = min(1.0, s.fuel_damage_fraction + result.damage)
+        # Stack monitor dose rate follows the current release rate.
+        s.radiation_level_sv_hr = 5000.0 * result.release_rate_tbq_s
+        s.time_since_shutdown_s += dt
+
     def get_instrument_readings(self, rng: _random.Random | None = None) -> dict[str, Any]:
         """Return instrument readings as the operator would see them.
 
@@ -760,6 +807,10 @@ class ReactorSimulation:
                     readings["equipment"][eq_id] = {"status": "CLOSED"}
                     continue
             info: dict[str, Any] = {"status": apparent}
+            if self.pile_fire and eq_id in ("blower_1", "blower_2"):
+                info["speed_pct"] = round(eq.speed_pct if eq.status == EquipmentStatus.RUNNING else 0.0, 0)
+            if self.pile_fire and eq_id == "water_injection":
+                info["flow_kg_s"] = round(self.pile_water_flow_kg_s(), 1)
             if eq.seal_failed:
                 info["seals"] = "FAILED, leaking"
             elif eq.seal_cooling_lost:
@@ -826,6 +877,10 @@ class ReactorSimulation:
                 extra = f" (temp: {info['temp_c']}°C, level: {info['level_pct']}%)"
             if "seals" in info:
                 extra = f" (seals: {info['seals']})"
+            if "speed_pct" in info:
+                extra = f" (speed: {info['speed_pct']:g}%)"
+            if "flow_kg_s" in info:
+                extra = f" (flow: {info['flow_kg_s']:g} kg/s)"
             lines.append(f"  {eq_id}: {status}{extra}")
 
         lines.append("\n" + "=" * 60)

@@ -240,6 +240,16 @@ Begin by observing the instruments to assess the current situation."""
                 "simulated minutes (cladding below limit, fuel damage below 10%, "
                 "hydrogen below 4%, containment below design pressure)."
             )
+        elif self.config.target_outcome == "extinguish":
+            return (
+                "Put out the pile fire and keep the radioactive release as small as possible, "
+                "without causing a hydrogen explosion. The fire is out once the burning fuel "
+                "channels are below 300°C, where uranium stops burning in air. This scenario "
+                "runs for its full duration. Outcome at the end: fire out with less than "
+                "10 TBq released in total is full success; fire out with more is partial "
+                "success; a fire still burning earns nothing; more than 50 TBq released, "
+                "hydrogen above 13% or a hydrogen explosion is a failure."
+            )
         elif self.config.target_outcome == "maintain_power":
             return (
                 "Maintain stable power output at rated capacity while responding "
@@ -640,11 +650,15 @@ Begin by observing the instruments to assess the current situation."""
     @tool
     async def inject_coolant(self, params: InjectCoolantParams) -> ToolOutput:
         """Emergency coolant injection from various sources.
-        source: 'borated_water', 'seawater', 'fire_truck', 'makeup_tank'.
+        source: 'borated_water', 'seawater', 'fire_truck', 'makeup_tank';
+        'water' for the hoses of an air-cooled pile (Windscale).
         flow_rate_kg_s: desired injection flow rate.
         boron_ppm: boron concentration (for borated_water, adds negative reactivity).
         """
         assert self.sim is not None
+
+        if self.sim.pile_fire:
+            return self._pile_water_injection(params)
 
         valid_sources = {"borated_water", "seawater", "fire_truck", "makeup_tank"}
         if params.source not in valid_sources:
@@ -699,6 +713,35 @@ Begin by observing the instruments to assess the current situation."""
                 f" requested; the running injection pumps deliver at most {capacity:.1f} kg/s"
             )
 
+        return self._advance_time_and_get_output("inject_coolant", detail)
+
+    def _pile_water_injection(self, params: InjectCoolantParams) -> ToolOutput:
+        """Set the hose water flow into a burning pile's fuel channels."""
+        assert self.sim is not None
+        hoses = self.sim.equipment.get("water_injection")
+        if params.source != "water" or hoses is None:
+            rated = hoses.flow_kg_s if hoses is not None else 0.0
+            return ToolOutput(
+                metadata={"error": f"Unknown source: {params.source}"},
+                blocks=[TextBlock(text=(
+                    f"Error: coolant source '{params.source}' does not exist at this plant. "
+                    "The only water supply is the hoses into the fuel channels: "
+                    f"source='water' (up to {rated:g} kg/s)."
+                ))],
+                reward=0.0,
+                finished=False,
+            )
+        rated = hoses.flow_kg_s
+        flow = max(0.0, min(params.flow_rate_kg_s, rated))
+        if flow > 0:
+            hoses.status = EquipmentStatus.RUNNING
+            hoses.speed_pct = 100.0 * flow / rated
+            detail = f"Water injection into the fuel channels at {flow:.1f} kg/s"
+            if params.flow_rate_kg_s > rated:
+                detail += f" (requested {params.flow_rate_kg_s:.1f} kg/s; the hoses deliver at most {rated:g} kg/s)"
+        else:
+            hoses.stop()
+            detail = "Water injection stopped"
         return self._advance_time_and_get_output("inject_coolant", detail)
 
     @tool
