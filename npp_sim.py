@@ -299,6 +299,19 @@ Begin by observing the instruments to assess the current situation."""
         }
         return notes.get(self.config.reactor_type, "No specific notes available.")
 
+    def _fire_truck_refusal(self) -> ToolOutput | None:
+        """Error when the fire truck cannot pump against the vessel pressure."""
+        assert self.sim is not None
+        # Fire truck can only inject at low pressure
+        if self.sim.state.coolant_pressure_mpa <= 1.5:
+            return None
+        return ToolOutput(
+            metadata={"error": "Pressure too high for fire truck"},
+            blocks=[TextBlock(text=f"Error: Reactor vessel pressure ({self.sim.state.coolant_pressure_mpa:.1f} MPa) is too high for fire truck injection. Must depressurize below ~1.5 MPa first.")],
+            reward=0.0,
+            finished=False,
+        )
+
     def _advance_time_and_get_output(
         self, action_name: str, action_detail: str, n_steps: int = 1
     ) -> ToolOutput:
@@ -543,6 +556,11 @@ Begin by observing the instruments to assess the current situation."""
                 finished=False,
             )
 
+        if params.pump_id == "fire_truck" and params.action in ("start", "set_speed"):
+            refusal = self._fire_truck_refusal()
+            if refusal is not None:
+                return refusal
+
         if params.action == "start":
             ok, msg = eq.start()
         elif params.action == "stop":
@@ -603,6 +621,10 @@ Begin by observing the instruments to assess the current situation."""
         else:
             # Treat non-Valve equipment as simple on/off
             if params.action == "open":
+                if params.valve_id == "fire_truck":
+                    refusal = self._fire_truck_refusal()
+                    if refusal is not None:
+                        return refusal
                 ok, msg = eq.start()
             elif params.action == "close":
                 ok, msg = eq.stop()
@@ -634,6 +656,10 @@ Begin by observing the instruments to assess the current situation."""
             )
 
         if params.action == "activate":
+            if params.system_id == "fire_truck":
+                refusal = self._fire_truck_refusal()
+                if refusal is not None:
+                    return refusal
             ok, msg = eq.start()
         elif params.action == "deactivate":
             ok, msg = eq.stop()
@@ -679,14 +705,9 @@ Begin by observing the instruments to assess the current situation."""
                     reward=0.0,
                     finished=False,
                 )
-            # Fire truck can only inject at low pressure
-            if self.sim.state.coolant_pressure_mpa > 1.5:
-                return ToolOutput(
-                    metadata={"error": "Pressure too high for fire truck"},
-                    blocks=[TextBlock(text=f"Error: Reactor vessel pressure ({self.sim.state.coolant_pressure_mpa:.1f} MPa) is too high for fire truck injection. Must depressurize below ~1.5 MPa first.")],
-                    reward=0.0,
-                    finished=False,
-                )
+            refusal = self._fire_truck_refusal()
+            if refusal is not None:
+                return refusal
             ft.status = EquipmentStatus.RUNNING
             ft.flow_kg_s = params.flow_rate_kg_s
 

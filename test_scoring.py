@@ -46,7 +46,6 @@ PROCEDURES = {
         ("operate_pump", {"pump_id": "hpi_2", "action": "start"}),
     ],
     "fukushima_rcic_failure": [
-        ("activate_system", {"system_id": "fire_truck", "action": "activate"}),
         ("operate_valve", {"valve_id": "srv_1", "action": "open"}),
         ("operate_valve", {"valve_id": "srv_2", "action": "open"}),
         ("inject_coolant", {"source": "fire_truck", "flow_rate_kg_s": 100.0}),
@@ -579,3 +578,63 @@ async def test_intermittent_offscale_reading_does_not_raise(seed):
         value = env.sim.get_instrument_readings()["thermal"]["cladding_temp_c"]
         seen.add(type(value))
     assert seen <= {float, str}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delay", [0, 1, 2])
+async def test_rcic_failure_leaves_time_to_depressurize_and_inject(delay):
+    # The core is still covered when RCIC stops, so an operator who spends a
+    # step or two assessing before depressurizing still saves it.
+    passive, out_p, env_p = await _play("fukushima_rcic_failure", [])
+    actions = [("wait", {})] * delay + PROCEDURES["fukushima_rcic_failure"]
+    rewards, out, env = await _play("fukushima_rcic_failure", actions)
+    assert out_p.metadata["reason"] == "hydrogen_detonation"
+    assert env_p.step_count >= 4
+    assert out.metadata["reason"] == "stabilized"
+    assert sum(rewards) > sum(passive) + 2.0
+
+
+@pytest.mark.asyncio
+async def test_rcic_failure_too_slow_a_response_fails():
+    # The batteries that open the SRVs die within the hour.
+    actions = [("wait", {})] * 4 + PROCEDURES["fukushima_rcic_failure"]
+    _, out, _ = await _play("fukushima_rcic_failure", actions)
+    assert out.metadata["reason"] == "hydrogen_detonation"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool,params", [
+    ("activate_system", {"system_id": "fire_truck", "action": "activate"}),
+    ("operate_pump", {"pump_id": "fire_truck", "action": "start"}),
+    ("operate_pump", {"pump_id": "fire_truck", "action": "set_speed", "speed_pct": 100.0}),
+    ("operate_valve", {"valve_id": "fire_truck", "action": "open"}),
+    ("inject_coolant", {"source": "fire_truck", "flow_rate_kg_s": 100.0}),
+])
+async def test_fire_truck_cannot_pump_against_vessel_pressure(tool, params):
+    env = N.NuclearPlantEnvironment(task_spec=_task("fukushima_rcic_failure"))
+    await env.setup()
+    out = await getattr(env, tool)(PARAMS[tool](**params))
+    assert out.metadata.get("error") == "Pressure too high for fire truck"
+    assert env.step_count == 0
+    assert env.sim.equipment.get_fire_truck_flow() == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["fukushima_rcic_failure", "fukushima_hydrogen"])
+@pytest.mark.parametrize("pump", ["rcic", "hpci"])
+async def test_failed_rcic_and_hpci_stay_failed(scenario, pump):
+    env = N.NuclearPlantEnvironment(task_spec=_task(scenario))
+    await env.setup()
+    await env.operate_pump(N.OperatePumpParams(pump_id=pump, action="start"))
+    assert env.sim.equipment.get(pump).status.value == "failed"
+
+
+@pytest.mark.asyncio
+async def test_rcic_failure_decay_heat_is_fourteen_hours_after_shutdown():
+    task = _task("fukushima_rcic_failure")
+    env = N.NuclearPlantEnvironment(task_spec=task)
+    await env.setup()
+    start = task["initial_conditions"]["time_since_shutdown_s"]
+    await env.wait(N.WaitParams())
+    assert env.sim.state.time_since_shutdown_s == start + 60.0 * task["time_step_minutes"]
+    assert env.sim.state.decay_heat_mw < 20.0  # ~0.75% of 2381 MWt

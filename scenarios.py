@@ -644,9 +644,12 @@ FUKUSHIMA_RCIC_FAILURE = Scenario(
         "reactivity_moderator_temp": 0.0,
         "xenon_concentration": 1.2,
         "iodine_concentration": 0.8,
-        "fuel_temp_c": 600.0,
-        "fuel_centerline_temp_c": 800.0,
-        "cladding_temp_c": 450.0,
+        # RCIC has just stopped: the core is still covered, so the fuel sits
+        # near the saturation temperature of the water around it (~290 C at
+        # 7.5 MPa) and heats up only once there is no flow to cool it.
+        "fuel_temp_c": 295.0,
+        "fuel_centerline_temp_c": 300.0,
+        "cladding_temp_c": 290.0,
         "coolant_inlet_temp_c": 200.0,
         "coolant_outlet_temp_c": 286.0,
         "coolant_pressure_mpa": 7.5,
@@ -657,6 +660,8 @@ FUKUSHIMA_RCIC_FAILURE = Scenario(
         "pressurizer_pressure_mpa": 0.0,
         "decay_heat_fraction": 0.008,
         "time_since_shutdown_s": 50400.0,
+        # Shut down 14 hours ago: decay heat follows that clock from the start.
+        "was_operating": False,
         "fuel_damage_fraction": 0.0,
         "cladding_oxidation_pct": 0.0,
         "hydrogen_generated_kg": 0.0,
@@ -670,8 +675,8 @@ FUKUSHIMA_RCIC_FAILURE = Scenario(
         "equipment": {
             "rcp_a": {"status": "tripped"},
             "rcp_b": {"status": "tripped"},
-            "rcic": {"status": "failed"},
-            "hpci": {"status": "failed"},
+            "rcic": _FAILED,
+            "hpci": _FAILED,
             "eccs_lp": {"status": "unavailable"},
             "diesel_1": {"status": "destroyed"},
             "diesel_2": {"status": "destroyed"},
@@ -745,8 +750,8 @@ FUKUSHIMA_HYDROGEN = Scenario(
         "equipment": {
             "rcp_a": {"status": "tripped"},
             "rcp_b": {"status": "tripped"},
-            "rcic": {"status": "failed"},
-            "hpci": {"status": "failed"},
+            "rcic": _FAILED,
+            "hpci": _FAILED,
             "eccs_lp": {"status": "unavailable"},
             "diesel_1": {"status": "destroyed"},
             "diesel_2": {"status": "destroyed"},

@@ -90,7 +90,7 @@ Agents have 10 environment-specific tools:
 | `operate_pump` | Yes | Start/stop/adjust coolant pumps. Some require AC power. |
 | `operate_valve` | Yes | Open/close valves (PORV, block valve, SRVs, MSIVs). Stuck valves cannot be operated directly. |
 | `activate_system` | Yes | Activate/deactivate safety systems (ECCS, RCIC, diesels, fire trucks). |
-| `inject_coolant` | Yes | Emergency injection from borated water, seawater, fire truck, or makeup tank. Fire truck requires low pressure. In the Windscale fire the only source is `water` (the hoses). |
+| `inject_coolant` | Yes | Emergency injection from borated water, seawater, fire truck, or makeup tank. The fire truck works only below ~1.5 MPa, however it is started. In the Windscale fire the only source is `water` (the hoses). |
 | `order_scram` | Yes | Emergency shutdown (AZ-5/SCRAM). Dangerous in RBMK with low ORM. |
 | `vent_containment` | Yes | Vent via filtered, unfiltered, or wetwell path. Reduces H2 risk but releases some radioactivity. The vent stays open until `containment_vent` is closed. |
 | `submit_log` | No | Document reasoning. No simulation effect. |
